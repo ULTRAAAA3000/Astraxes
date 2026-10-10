@@ -1,0 +1,21 @@
+name = "astraxes-api"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "astraxes-db"
+database_id = "c44d5bbd-0463-4cac-bb0a-52c94348e85f"
+
+[vars]
+APP_NAME = "Astraxes — AI Study Assistant"
+ALLOWED_ORIGIN = "*"
+DEVICE_DAILY_NEURONS = "2500"
+GLOBAL_DAILY_NEURONS = "9000"
+
+[observability]
+enabled = true
