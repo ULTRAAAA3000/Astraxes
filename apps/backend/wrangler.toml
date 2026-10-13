@@ -14,7 +14,8 @@ database_id = "c44d5bbd-0463-4cac-bb0a-52c94348e85f"
 [vars]
 APP_NAME = "Astraxes — AI Study Assistant"
 ALLOWED_ORIGIN = "*"
-DEVICE_DAILY_NEURONS = "2500"
+GUEST_DAILY_NEURONS = "50"
+USER_DAILY_NEURONS = "550"
 GLOBAL_DAILY_NEURONS = "9000"
 
 [observability]

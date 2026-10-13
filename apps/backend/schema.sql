@@ -28,3 +28,30 @@ CREATE TABLE IF NOT EXISTS usage_daily (
   requests INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (owner_id, day)
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
+  daily_quota REAL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS login_failures (
+  email TEXT NOT NULL,
+  at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_failures_email ON login_failures(email, at);

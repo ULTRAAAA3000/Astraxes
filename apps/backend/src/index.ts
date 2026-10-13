@@ -1,11 +1,35 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { cors } from 'hono/cors'
+import { HTTPException } from 'hono/http-exception'
 import { GenerationError, MAX_QUESTIONS, MIN_QUESTIONS, QUIZ_QUESTION_COUNT, generateContent, normalizeInput, prepareSource } from './prompts'
 import { LONG_TEXT_CHARS, condenseText } from './condense'
 import {
-  DEFAULT_DEVICE_LIMIT,
+  MAX_PASSWORD,
+  MAX_QUOTA,
+  MIN_PASSWORD,
+  bearerToken,
+  bootstrapAdmin,
+  clearFailures,
+  createSession,
+  destroySession,
+  ensureAuthSchema,
+  hashPassword,
+  normalizeEmail,
+  publicUser,
+  recordFailure,
+  tooManyFailures,
+  userFromToken,
+  validPassword,
+  verifyPassword
+} from './auth'
+import type { UserRow } from './auth'
+import {
   DEFAULT_GLOBAL_LIMIT,
+  DEFAULT_GUEST_LIMIT,
+  DEFAULT_USER_LIMIT,
   createTracker,
+  currentDay,
   limitFrom,
   neuronsOf,
   nextResetAt,
@@ -19,9 +43,20 @@ interface Env {
   DB: D1Database
   ALLOWED_ORIGIN: string
   APP_NAME: string
-  DEVICE_DAILY_NEURONS?: string
+  GUEST_DAILY_NEURONS?: string
+  USER_DAILY_NEURONS?: string
   GLOBAL_DAILY_NEURONS?: string
+  ADMIN_EMAIL?: string
+  ADMIN_PASSWORD?: string
 }
+
+interface Identity {
+  owner: string
+  limit: number
+  user: UserRow | null
+}
+
+type AppContext = Context<{ Bindings: Env }>
 
 interface GenerationRow {
   type: GenerationType
@@ -39,6 +74,7 @@ const MAX_HISTORY_LIMIT = 100
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 
 let schemaReady: Promise<void> | null = null
+let adminReady: Promise<void> | null = null
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -84,6 +120,8 @@ async function ensureSchema(db: D1Database): Promise<void> {
       )`
     )
     .run()
+
+  await ensureAuthSchema(db)
 }
 
 async function resolveOwner(header: string | undefined): Promise<string | null> {
@@ -101,8 +139,8 @@ app.use(
       const list = allowed.split(',').map((item) => item.trim())
       return list.includes(origin) ? origin : list[0]
     },
-    allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'X-Client-Id'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowHeaders: ['Content-Type', 'X-Client-Id', 'Authorization'],
     maxAge: 86400
   })
 )
@@ -114,9 +152,37 @@ app.use('/api/*', async (c, next) => {
       console.error('schema check failed', error)
     })
     await schemaReady
+    adminReady ??= bootstrapAdmin(c.env.DB, c.env.ADMIN_EMAIL, c.env.ADMIN_PASSWORD).catch((error) => {
+      adminReady = null
+      console.error('admin bootstrap failed', error)
+    })
+    await adminReady
   }
   await next()
 })
+
+async function identify(c: AppContext): Promise<Identity> {
+  const token = bearerToken(c.req.header('Authorization'))
+  if (token) {
+    const user = await userFromToken(c.env.DB, token)
+    if (!user) throw new HTTPException(401, { res: c.json({ error: 'Сесію завершено. Увійдіть знову' }, 401) })
+    return { owner: `u:${user.id}`, limit: user.daily_quota ?? limitFrom(c.env.USER_DAILY_NEURONS, DEFAULT_USER_LIMIT), user }
+  }
+  const owner = await resolveOwner(c.req.header('X-Client-Id'))
+  if (!owner) throw new HTTPException(400, { res: c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400) })
+  return { owner, limit: limitFrom(c.env.GUEST_DAILY_NEURONS, DEFAULT_GUEST_LIMIT), user: null }
+}
+
+async function requireAdmin(c: AppContext): Promise<Identity> {
+  const identity = await identify(c)
+  if (identity.user?.role !== 'admin') throw new HTTPException(403, { res: c.json({ error: 'Недостатньо прав' }, 403) })
+  return identity
+}
+
+async function adoptGuestHistory(c: AppContext, userId: number): Promise<void> {
+  const guest = await resolveOwner(c.req.header('X-Client-Id'))
+  if (guest) await c.env.DB.prepare('UPDATE documents SET owner_id = ? WHERE owner_id = ?').bind(`u:${userId}`, guest).run()
+}
 
 function decode(type: GenerationType, content: string): string | QuizQuestion[] | KeyTerm[] | null {
   if (type === 'summary' || type === 'retelling') return content
@@ -143,8 +209,7 @@ app.get('/', (c) => c.json({ name: c.env.APP_NAME, status: 'ok' }))
 app.get('/api/health', (c) => c.json({ name: c.env.APP_NAME, status: 'ok' }))
 
 app.post('/api/generate', async (c) => {
-  const owner = await resolveOwner(c.req.header('X-Client-Id'))
-  if (!owner) return c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400)
+  const { owner, limit, user } = await identify(c)
 
   let body: unknown
   try {
@@ -188,11 +253,13 @@ app.post('/api/generate', async (c) => {
   const normalized = normalizeInput(text)
   const documentTitle = (title?.trim() || deriveTitle(normalized)).slice(0, MAX_TITLE_CHARS)
 
-  const deviceLimit = limitFrom(c.env.DEVICE_DAILY_NEURONS, DEFAULT_DEVICE_LIMIT)
   const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
-  const quota = await readQuota(c.env.DB, owner, deviceLimit, globalLimit)
-  if (quota.device.used >= deviceLimit) {
-    return c.json({ error: 'Денний ліміт AI для цього пристрою вичерпано. Він оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
+  const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
+  if (quota.device.used >= limit) {
+    const error = user
+      ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
+      : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
+    return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
   }
   if (quota.global.used >= globalLimit) {
     return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
@@ -272,32 +339,141 @@ app.post('/api/generate', async (c) => {
       results,
       errors,
       usage,
-      quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit: deviceLimit, resetsAt: nextResetAt() }
+      quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit, resetsAt: nextResetAt() }
     },
     201
   )
 })
 
-app.get('/api/usage', async (c) => {
-  const owner = await resolveOwner(c.req.header('X-Client-Id'))
-  if (!owner) return c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400)
+app.post('/api/auth/register', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const email = normalizeEmail(body?.email)
+  if (!email) return c.json({ error: 'Вкажіть коректний email' }, 400)
+  if (!validPassword(body?.password)) {
+    return c.json({ error: `Пароль має містити від ${MIN_PASSWORD} до ${MAX_PASSWORD} символів` }, 400)
+  }
 
-  const deviceLimit = limitFrom(c.env.DEVICE_DAILY_NEURONS, DEFAULT_DEVICE_LIMIT)
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
+  if (existing) return c.json({ error: 'Акаунт із таким email уже існує. Увійдіть' }, 409)
+
+  const inserted = await c.env.DB.prepare("INSERT INTO users (email, password_hash, role) VALUES (?, ?, 'user')")
+    .bind(email, await hashPassword(body.password))
+    .run()
+  const id = Number(inserted.meta.last_row_id)
+
+  await adoptGuestHistory(c, id)
+  const token = await createSession(c.env.DB, id)
+  return c.json({ token, user: publicUser({ id, email, role: 'user' }) }, 201)
+})
+
+app.post('/api/auth/login', async (c) => {
+  const body = await c.req.json().catch(() => null)
+  const email = normalizeEmail(body?.email)
+  if (!email || typeof body?.password !== 'string' || !body.password) {
+    return c.json({ error: 'Вкажіть email і пароль' }, 400)
+  }
+  if (await tooManyFailures(c.env.DB, email)) {
+    return c.json({ error: 'Забагато невдалих спроб. Спробуйте за 15 хвилин' }, 429)
+  }
+
+  const user = await c.env.DB.prepare('SELECT id, email, role, daily_quota, password_hash FROM users WHERE email = ?')
+    .bind(email)
+    .first<UserRow>()
+  const valid = user ? await verifyPassword(body.password, user.password_hash) : false
+  if (!user || !valid) {
+    await recordFailure(c.env.DB, email)
+    return c.json({ error: 'Невірний email або пароль' }, 401)
+  }
+
+  await clearFailures(c.env.DB, email)
+  await adoptGuestHistory(c, user.id)
+  const token = await createSession(c.env.DB, user.id)
+  return c.json({ token, user: publicUser(user) })
+})
+
+app.post('/api/auth/logout', async (c) => {
+  const token = bearerToken(c.req.header('Authorization'))
+  if (token) await destroySession(c.env.DB, token)
+  return c.json({ ok: true })
+})
+
+app.get('/api/admin/users', async (c) => {
+  await requireAdmin(c)
+  const defaultLimit = limitFrom(c.env.USER_DAILY_NEURONS, DEFAULT_USER_LIMIT)
+
+  const { results } = await c.env.DB.prepare(
+    `SELECT u.id, u.email, u.role, u.daily_quota, u.created_at, u.last_login_at,
+            COALESCE(d.neurons, 0) AS neurons, COALESCE(d.tokens, 0) AS tokens,
+            (SELECT COUNT(*) FROM documents WHERE owner_id = 'u:' || u.id) AS documents
+     FROM users u
+     LEFT JOIN usage_daily d ON d.owner_id = 'u:' || u.id AND d.day = ?
+     ORDER BY u.id`
+  )
+    .bind(currentDay())
+    .all<{
+      id: number
+      email: string
+      role: string
+      daily_quota: number | null
+      created_at: string
+      last_login_at: string | null
+      neurons: number
+      tokens: number
+      documents: number
+    }>()
+
+  return c.json({
+    defaultLimit,
+    items: results.map((row) => ({
+      id: row.id,
+      email: row.email,
+      role: row.role,
+      quota: row.daily_quota ?? defaultLimit,
+      customQuota: row.daily_quota !== null,
+      used: Math.round(row.neurons * 100) / 100,
+      tokens: row.tokens,
+      documents: row.documents,
+      createdAt: row.created_at,
+      lastLoginAt: row.last_login_at
+    }))
+  })
+})
+
+app.patch('/api/admin/users/:id', async (c) => {
+  await requireAdmin(c)
+  const id = parseId(c.req.param('id'))
+  if (id === null) return c.json({ error: 'Некоректний id' }, 400)
+
+  const body = await c.req.json().catch(() => null)
+  const quota = body?.dailyQuota
+  const valid = quota === null || (typeof quota === 'number' && Number.isFinite(quota) && quota >= 0 && quota <= MAX_QUOTA)
+  if (!valid) return c.json({ error: `Квота має бути числом від 0 до ${MAX_QUOTA} або null` }, 400)
+
+  const updated = await c.env.DB.prepare('UPDATE users SET daily_quota = ? WHERE id = ?')
+    .bind(quota === null ? null : Math.round(quota), id)
+    .run()
+  if (!updated.meta.changes) return c.json({ error: 'Користувача не знайдено' }, 404)
+  return c.json({ id, dailyQuota: quota === null ? null : Math.round(quota) })
+})
+
+app.get('/api/usage', async (c) => {
+  const { owner, limit, user } = await identify(c)
+
   const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
-  const quota = await readQuota(c.env.DB, owner, deviceLimit, globalLimit)
+  const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
 
   return c.json({
     used: Math.round(quota.device.used * 100) / 100,
-    limit: deviceLimit,
+    limit,
     tokens: quota.device.tokens,
     resetsAt: nextResetAt(),
-    serviceAvailable: quota.global.used < globalLimit
+    serviceAvailable: quota.global.used < globalLimit,
+    account: user ? publicUser(user) : null
   })
 })
 
 app.get('/api/history', async (c) => {
-  const owner = await resolveOwner(c.req.header('X-Client-Id'))
-  if (!owner) return c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400)
+  const { owner } = await identify(c)
 
   const requested = Number(c.req.query('limit') ?? DEFAULT_HISTORY_LIMIT)
   const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, MAX_HISTORY_LIMIT) : DEFAULT_HISTORY_LIMIT
@@ -325,8 +501,7 @@ app.get('/api/history', async (c) => {
 })
 
 app.get('/api/history/:id', async (c) => {
-  const owner = await resolveOwner(c.req.header('X-Client-Id'))
-  if (!owner) return c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400)
+  const { owner } = await identify(c)
 
   const id = parseId(c.req.param('id'))
   if (id === null) return c.json({ error: 'Некоректний id' }, 400)
@@ -360,8 +535,7 @@ app.get('/api/history/:id', async (c) => {
 })
 
 app.delete('/api/history/:id', async (c) => {
-  const owner = await resolveOwner(c.req.header('X-Client-Id'))
-  if (!owner) return c.json({ error: 'Не вказано ідентифікатор клієнта' }, 400)
+  const { owner } = await identify(c)
 
   const id = parseId(c.req.param('id'))
   if (id === null) return c.json({ error: 'Некоректний id' }, 400)
@@ -380,6 +554,7 @@ app.delete('/api/history/:id', async (c) => {
 app.notFound((c) => c.json({ error: 'Маршрут не знайдено' }, 404))
 
 app.onError((error, c) => {
+  if (error instanceof HTTPException) return error.getResponse()
   console.error('unhandled error', error)
   return c.json({ error: 'Внутрішня помилка сервера' }, 500)
 })

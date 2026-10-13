@@ -44,12 +44,32 @@ export interface Usage {
   neurons: number
 }
 
+export interface Account {
+  id: number
+  email: string
+  role: 'user' | 'admin'
+}
+
 export interface UsageInfo {
   used: number
   limit: number
   tokens: number
   resetsAt: string
   serviceAvailable: boolean
+  account: Account | null
+}
+
+export interface AdminUser {
+  id: number
+  email: string
+  role: 'user' | 'admin'
+  quota: number
+  customQuota: boolean
+  used: number
+  tokens: number
+  documents: number
+  createdAt: string
+  lastLoginAt: string | null
 }
 
 export interface GenerateResponse {
@@ -78,9 +98,31 @@ export const SOFT_LIMIT = 14000
 export const HARD_LIMIT = 90000
 export const QUESTION_OPTIONS = [4, 6, 8, 10]
 
+export const SESSION_EXPIRED_EVENT = 'astraxes:session-expired'
+
+const TOKEN_KEY = 'astraxes:token'
 const CLIENT_KEY = 'astraxes:client'
 const CLIENT_PATTERN = /^[A-Za-z0-9_-]{16,128}$/
 let memoryClientId: string | null = null
+let memoryToken: string | null = null
+
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? memoryToken
+  } catch {
+    return memoryToken
+  }
+}
+
+export function setToken(token: string | null): void {
+  memoryToken = token
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    return
+  }
+}
 
 function createClientId(): string {
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
@@ -101,11 +143,21 @@ export function getClientId(): string {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getToken()
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', 'X-Client-Id': getClientId(), ...(init?.headers ?? {}) }
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Client-Id': getClientId(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {})
+    }
   })
   const data = await response.json().catch(() => null)
+  if (response.status === 401 && token && !path.startsWith('/api/auth/')) {
+    setToken(null)
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
   if (!response.ok) {
     const details = data?.errors
       ? Object.entries(data.errors as Record<string, string>)

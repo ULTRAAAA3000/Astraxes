@@ -12,7 +12,8 @@ export interface QuotaSnapshot {
 
 export const INPUT_NEURONS_PER_TOKEN = 4119 / 1_000_000
 export const OUTPUT_NEURONS_PER_TOKEN = 34868 / 1_000_000
-export const DEFAULT_DEVICE_LIMIT = 2500
+export const DEFAULT_GUEST_LIMIT = 50
+export const DEFAULT_USER_LIMIT = 550
 export const DEFAULT_GLOBAL_LIMIT = 9000
 export const GLOBAL_OWNER = '*'
 

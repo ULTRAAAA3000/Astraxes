@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, KeyboardEvent } from 'react'
-import { ALL_TYPES, HARD_LIMIT, MIN_CHARS, QUESTION_OPTIONS, SOFT_LIMIT, TYPE_LABELS, availableTabs, countWords, estimateTokens, formatDate, request } from './lib/api'
-import type { Doc, GenType, GenerateResponse, HistoryDetail, HistoryItem, UsageInfo } from './lib/api'
+import { ALL_TYPES, HARD_LIMIT, MIN_CHARS, QUESTION_OPTIONS, SESSION_EXPIRED_EVENT, SOFT_LIMIT, TYPE_LABELS, availableTabs, countWords, estimateTokens, formatDate, request, setToken } from './lib/api'
+import type { Account, Doc, GenType, GenerateResponse, HistoryDetail, HistoryItem, UsageInfo } from './lib/api'
 import { SAMPLE_TEXT } from './lib/sample'
 import { ACCEPT, extractFileText } from './lib/files'
 import { Icon } from './components/Icons'
@@ -12,6 +12,8 @@ import TermsView from './components/TermsView'
 import RetellingView from './components/RetellingView'
 import FeaturesSection from './components/FeaturesSection'
 import HowItWorksSection from './components/HowItWorksSection'
+import AuthModal from './components/AuthModal'
+import AdminSection from './components/AdminSection'
 
 type Theme = 'light' | 'dark'
 
@@ -87,6 +89,8 @@ export default function App() {
   const [questionCount, setQuestionCount] = useState(draft.questionCount)
   const [menuOpen, setMenuOpen] = useState(false)
   const [usageInfo, setUsageInfo] = useState<UsageInfo | null>(null)
+  const [account, setAccount] = useState<Account | null>(null)
+  const [authMode, setAuthMode] = useState<'login' | 'register' | null>(null)
   const [selected, setSelected] = useState<Record<GenType, boolean>>({ summary: true, retelling: true, test: true, terms: true })
   const [loading, setLoading] = useState(false)
   const [step, setStep] = useState(0)
@@ -172,7 +176,9 @@ export default function App() {
 
   const loadUsage = useCallback(async () => {
     try {
-      setUsageInfo(await request<UsageInfo>('/api/usage'))
+      const data = await request<UsageInfo>('/api/usage')
+      setUsageInfo(data)
+      setAccount(data.account)
     } catch {
       setUsageInfo(null)
     }
@@ -181,6 +187,18 @@ export default function App() {
   useEffect(() => {
     loadUsage()
   }, [loadUsage])
+
+  useEffect(() => {
+    const onExpired = () => {
+      setAccount(null)
+      setCurrent(null)
+      notify('Сесію завершено. Увійдіть знову')
+      loadHistory()
+      loadUsage()
+    }
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired)
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired)
+  }, [notify, loadHistory, loadUsage])
 
   const showDoc = (doc: Doc) => {
     const tabs = availableTabs(doc.results)
@@ -343,6 +361,33 @@ export default function App() {
     }
   }
 
+  const onAuthed = (user: Account) => {
+    setAccount(user)
+    setAuthMode(null)
+    setCurrent(null)
+    setError(null)
+    notify(`Ви увійшли як ${user.email}`)
+    loadHistory()
+    loadUsage()
+  }
+
+  const signOut = async () => {
+    try {
+      await request('/api/auth/logout', { method: 'POST' })
+    } catch {
+      return
+    } finally {
+      setToken(null)
+      setAccount(null)
+      setCurrent(null)
+      setError(null)
+      setHistory([])
+      loadHistory()
+      loadUsage()
+      notify('Ви вийшли з акаунта')
+    }
+  }
+
   const toggleType = (type: GenType) => setSelected((prev) => ({ ...prev, [type]: !prev[type] }))
 
   const tabs = current ? availableTabs(current.results) : []
@@ -369,6 +414,25 @@ export default function App() {
             <a href="#history" className="nav-link hidden sm:inline-flex">
               Історія
             </a>
+            {account?.role === 'admin' && (
+              <a href="#admin" className="nav-link hidden sm:inline-flex">
+                Адмін
+              </a>
+            )}
+            <div className="ml-2 hidden items-center gap-2 sm:flex">
+              {account ? (
+                <>
+                  <span className="max-w-[11rem] truncate text-xs text-muted">{account.email}</span>
+                  <button type="button" onClick={signOut} className="btn btn-ghost btn-sm">
+                    Вийти
+                  </button>
+                </>
+              ) : (
+                <button type="button" onClick={() => setAuthMode('login')} className="btn btn-primary btn-sm">
+                  Увійти
+                </button>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
@@ -391,11 +455,12 @@ export default function App() {
         {menuOpen && (
           <div className="reveal border-t border-line sm:hidden">
             <nav className="mx-auto flex max-w-6xl flex-col px-3 py-2">
-              {[
+              {([
                 ['#how', 'Як це працює'],
                 ['#workspace', 'Кабінет'],
-                ['#history', 'Історія']
-              ].map(([href, label]) => (
+                ['#history', 'Історія'],
+                ...(account?.role === 'admin' ? [['#admin', 'Адмін']] : [])
+              ] as [string, string][]).map(([href, label]) => (
                 <a
                   key={href}
                   href={href}
@@ -405,6 +470,20 @@ export default function App() {
                   {label}
                 </a>
               ))}
+              <div className="mt-1 border-t border-line pt-1">
+                {account && <p className="truncate px-3 py-2 text-sm text-soft">{account.email}</p>}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false)
+                    if (account) signOut()
+                    else setAuthMode('login')
+                  }}
+                  className="w-full rounded-xl px-3 py-3.5 text-left text-base font-medium text-fg transition hover:bg-surface2"
+                >
+                  {account ? 'Вийти' : 'Увійти або створити акаунт'}
+                </button>
+              </div>
             </nav>
           </div>
         )}
@@ -424,7 +503,7 @@ export default function App() {
               <br />й терміни <span className="font-display font-normal italic">за секунди</span>
             </h1>
             <p className="reveal mx-auto mt-6 max-w-xl text-base leading-relaxed text-muted sm:text-lg" style={{ animationDelay: '160ms' }}>
-              Вставте текст параграфа чи лекції, і Astraxes складе чіткий конспект, тест для самоперевірки та словник ключових термінів. Без реєстрації.
+              Вставте текст параграфа чи лекції, і Astraxes складе чіткий конспект, тест для самоперевірки та словник ключових термінів. Спробуйте без реєстрації або створіть акаунт: історія збережеться, а ліміт буде більшим.
             </p>
             <div className="reveal mt-9 flex flex-wrap items-center justify-center gap-3" style={{ animationDelay: '240ms' }}>
               <a href="#workspace" className="btn btn-primary">
@@ -563,13 +642,21 @@ export default function App() {
             </div>
             {usageInfo && (
               <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs text-muted">
-                <span>Ліміт AI на сьогодні</span>
+                <span>{account ? 'Ліміт AI на сьогодні' : 'Гостьовий ліміт AI на сьогодні'}</span>
                 <div className="bar w-28 sm:w-40" role="progressbar" aria-valuenow={usagePercent} aria-valuemin={0} aria-valuemax={100}>
                   <div className="bar-fill" style={{ width: `${usagePercent}%` }} />
                 </div>
                 <span>
                   {usagePercent}% · {usageInfo.tokens.toLocaleString('uk-UA')} токенів
                 </span>
+                {!account && (
+                  <span className="w-full text-right">
+                    Гостьовий режим.{' '}
+                    <button type="button" onClick={() => setAuthMode('register')} className="font-semibold text-fg underline underline-offset-2">
+                      Створіть акаунт для більшого ліміту
+                    </button>
+                  </span>
+                )}
                 {!usageInfo.serviceAvailable && <span className="w-full text-right text-bad">Сервіс вичерпав добову квоту AI, спробуйте пізніше</span>}
               </div>
             )}
@@ -742,7 +829,11 @@ export default function App() {
             ))}
           </div>
         </section>
+
+        {account?.role === 'admin' && <AdminSection currentId={account.id} notify={notify} />}
       </main>
+
+      {authMode && <AuthModal initialMode={authMode} onClose={() => setAuthMode(null)} onAuthed={onAuthed} />}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-[max(1.5rem,env(safe-area-inset-bottom))] z-[70] flex flex-col items-center gap-2 px-4">
         {toasts.map((item) => (
