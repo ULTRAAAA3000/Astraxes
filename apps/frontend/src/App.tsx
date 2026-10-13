@@ -10,6 +10,8 @@ import SummaryView from './components/SummaryView'
 import QuizView from './components/QuizView'
 import TermsView from './components/TermsView'
 import RetellingView from './components/RetellingView'
+import FeaturesSection from './components/FeaturesSection'
+import HowItWorksSection from './components/HowItWorksSection'
 
 type Theme = 'light' | 'dark'
 
@@ -358,6 +360,9 @@ export default function App() {
             Astraxes AI
           </a>
           <nav className="flex items-center gap-1">
+            <a href="#how" className="nav-link hidden sm:inline-flex">
+              Як це працює
+            </a>
             <a href="#workspace" className="nav-link hidden sm:inline-flex">
               Кабінет
             </a>
@@ -387,6 +392,7 @@ export default function App() {
           <div className="reveal border-t border-line sm:hidden">
             <nav className="mx-auto flex max-w-6xl flex-col px-3 py-2">
               {[
+                ['#how', 'Як це працює'],
                 ['#workspace', 'Кабінет'],
                 ['#history', 'Історія']
               ].map(([href, label]) => (
@@ -425,6 +431,9 @@ export default function App() {
                 Почати роботу
                 <Icon name="arrow" />
               </a>
+              <a href="#how" className="btn btn-ghost">
+                Як це працює
+              </a>
             </div>
 
             <div className="reveal mx-auto mt-16 max-w-2xl text-left" style={{ animationDelay: '340ms' }}>
@@ -448,6 +457,10 @@ export default function App() {
             </div>
           </div>
         </section>
+
+        <FeaturesSection />
+
+        <HowItWorksSection />
 
         <section id="workspace" className="mx-auto max-w-4xl scroll-mt-20 px-5 pb-16 sm:pb-24">
           <p className="text-xs font-medium uppercase tracking-[0.14em] text-soft">Кабінет</p>

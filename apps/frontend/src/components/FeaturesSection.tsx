@@ -1,5 +1,5 @@
-import { Icon } from '../components/Icons'
-import type { IconName } from '../components/Icons'
+import { Icon } from './Icons'
+import type { IconName } from './Icons'
 
 export default function FeaturesSection() {
   return (
@@ -7,7 +7,7 @@ export default function FeaturesSection() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
           { icon: 'doc' as IconName, name: 'Конспект', text: 'Чітка структура: тема, розділи й підрозділи за змістом тексту. Лише суть, стислі завершені тези.' },
-          { icon: 'lines' as IconName, name: 'Переказ', text: 'Короткий зв’язний переказ у 4–6 речень: головна думка й ключові факти без зайвого.' },
+          { icon: 'lines' as IconName, name: 'Переказ', text: 'Короткий зв’язний переказ у 4–8 речень: головна думка й ключові факти без зайвого.' },
           { icon: 'check-list' as IconName, name: 'Тест', text: 'Від 4 до 10 питань: визначення, причинно-наслідкові зв’язки та факти. З поясненнями.' },
           { icon: 'tag' as IconName, name: 'Терміни', text: 'Картки ключових термінів із короткими визначеннями прямо з вашого тексту.' }
         ].map((item, index) => (

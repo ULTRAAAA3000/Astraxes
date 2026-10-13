@@ -186,15 +186,17 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 
-.nav-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.45rem 0.8rem;
-  border-radius: 9999px;
-  font-size: 0.85rem;
-  color: var(--muted);
-  transition: color 0.2s, background-color 0.2s;
+@layer components {
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.8rem;
+    border-radius: 9999px;
+    font-size: 0.85rem;
+    color: var(--muted);
+    transition: color 0.2s, background-color 0.2s;
+  }
 }
 
 .nav-link:hover {
@@ -318,14 +320,16 @@ button:disabled {
   border-color: color-mix(in srgb, var(--bad) 40%, transparent);
 }
 
-.icon-btn {
-  display: inline-grid;
-  place-items: center;
-  width: 2.25rem;
-  height: 2.25rem;
-  border-radius: 9999px;
-  color: var(--muted);
-  transition: color 0.2s, background-color 0.2s, transform 0.2s;
+@layer components {
+  .icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 9999px;
+    color: var(--muted);
+    transition: color 0.2s, background-color 0.2s, transform 0.2s;
+  }
 }
 
 .icon-btn:hover {
