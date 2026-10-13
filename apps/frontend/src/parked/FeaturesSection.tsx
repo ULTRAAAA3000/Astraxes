@@ -6,7 +6,7 @@ export default function FeaturesSection() {
     <section className="mx-auto max-w-6xl px-5 pb-16 sm:pb-20">
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
-          { icon: 'doc' as IconName, name: 'Конспект', text: 'Жорстка ієрархія «Тема → Ключові поняття → Факти». Лише суть, тези до 15 слів.' },
+          { icon: 'doc' as IconName, name: 'Конспект', text: 'Чітка структура: тема, розділи й підрозділи за змістом тексту. Лише суть, стислі завершені тези.' },
           { icon: 'lines' as IconName, name: 'Переказ', text: 'Короткий зв’язний переказ у 4–6 речень: головна думка й ключові факти без зайвого.' },
           { icon: 'check-list' as IconName, name: 'Тест', text: 'Від 4 до 10 питань: визначення, причинно-наслідкові зв’язки та факти. З поясненнями.' },
           { icon: 'tag' as IconName, name: 'Терміни', text: 'Картки ключових термінів із короткими визначеннями прямо з вашого тексту.' }
