@@ -90,7 +90,7 @@ export interface HistoryDetail {
   results: Results
 }
 
-export const API_URL = (import.meta.env?.VITE_API_URL ?? '').replace(/\/$/, '')
+export const API_URL = (import.meta.env?.VITE_API_URL ?? '').trim().replace(/\/+$/, '').replace(/\/api$/, '')
 export const ALL_TYPES: GenType[] = ['summary', 'retelling', 'test', 'terms']
 export const TYPE_LABELS: Record<GenType, string> = { summary: 'Конспект', retelling: 'Переказ', test: 'Тест', terms: 'Терміни' }
 export const MIN_CHARS = 80
