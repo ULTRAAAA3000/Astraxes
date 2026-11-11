@@ -4,6 +4,8 @@ import { cors } from 'hono/cors'
 import { HTTPException } from 'hono/http-exception'
 import { GenerationError, MAX_QUESTIONS, MIN_QUESTIONS, QUIZ_QUESTION_COUNT, generateContent, normalizeInput, prepareSource } from './prompts'
 import { LONG_TEXT_CHARS, condenseText } from './condense'
+import { ensureCacheSchema, pruneCache, readImage, readResult, resultKey, sha256Hex, writeImage, writeResult } from './cache'
+import { describeImage, validImage } from './vision'
 import {
   MAX_PASSWORD,
   MAX_QUOTA,
@@ -67,6 +69,7 @@ interface GenerationRow {
 const ALL_TYPES: GenerationType[] = ['summary', 'retelling', 'test', 'terms']
 const MIN_TEXT_CHARS = 80
 const MAX_INPUT_CHARS = 90000
+const TWO_STAGE_CHARS = 4000
 const MAX_TITLE_CHARS = 120
 const DEFAULT_HISTORY_LIMIT = 30
 const MAX_HISTORY_LIMIT = 100
@@ -122,6 +125,7 @@ async function ensureSchema(db: D1Database): Promise<void> {
     .run()
 
   await ensureAuthSchema(db)
+  await ensureCacheSchema(db)
 }
 
 async function resolveOwner(header: string | undefined): Promise<string | null> {
@@ -252,53 +256,84 @@ app.post('/api/generate', async (c) => {
 
   const normalized = normalizeInput(text)
   const documentTitle = (title?.trim() || deriveTitle(normalized)).slice(0, MAX_TITLE_CHARS)
+  const fresh = (body as Record<string, unknown>).fresh === true
+
+  const stored: { type: GenerationType; content: string }[] = []
+  const cachedTypes: GenerationType[] = []
+  const keys = new Map<GenerationType, string>()
+  let pending: GenerationType[] = []
+
+  await Promise.all(
+    requested.map(async (type) => {
+      const key = await resultKey(type, quizCount, normalized)
+      keys.set(type, key)
+      const hit = fresh ? null : await readResult(c.env.DB, key)
+      if (hit !== null && decode(type, hit) !== null) {
+        stored.push({ type, content: hit })
+        cachedTypes.push(type)
+      } else {
+        pending.push(type)
+      }
+    })
+  )
+  pending = requested.filter((type) => pending.includes(type))
 
   const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
   const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
-  if (quota.device.used >= limit) {
-    const error = user
-      ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
-      : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
-    return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
-  }
-  if (quota.global.used >= globalLimit) {
-    return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
+  if (pending.length > 0) {
+    if (quota.device.used >= limit) {
+      const error = user
+        ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
+        : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
+      return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
+    }
+    if (quota.global.used >= globalLimit) {
+      return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
+    }
   }
 
   const tracker = createTracker()
-  let source = prepareSource(normalized)
+  const errors: Partial<Record<GenerationType, string>> = {}
   let chunks = 0
-  if (normalized.length > LONG_TEXT_CHARS) {
-    const condensed = await condenseText(c.env.AI, normalized, tracker)
-    source = prepareSource(condensed.text)
-    chunks = condensed.chunks
-  }
 
-  const outcomes = await Promise.all(
-    requested.map(async (type) => {
+  if (pending.length > 0) {
+    let source = prepareSource(normalized)
+    if (normalized.length > LONG_TEXT_CHARS) {
+      const condensed = await condenseText(c.env.AI, normalized, tracker)
+      source = prepareSource(condensed.text)
+      chunks = condensed.chunks
+    }
+
+    const run = async (type: GenerationType, material: 'source' | 'summary', input: string) => {
       try {
-        const content = await generateContent(c.env.AI, type, source, { questionCount: quizCount, tracker })
+        const content = await generateContent(c.env.AI, type, input, { questionCount: quizCount, tracker, material })
         return { type, content, error: null as string | null }
       } catch (error) {
         console.error(`generation failed [${type}]`, error)
         const message = error instanceof GenerationError ? error.message : 'Помилка під час звернення до моделі'
         return { type, content: null as string | null, error: message }
       }
-    })
-  )
+    }
 
-  const results: Partial<Record<GenerationType, string | QuizQuestion[] | KeyTerm[]>> = {}
-  const errors: Partial<Record<GenerationType, string>> = {}
-  const stored: { type: GenerationType; content: string }[] = []
+    const outcomes: { type: GenerationType; content: string | null; error: string | null }[] = []
+    const others = pending.filter((type) => type !== 'summary')
+    if (pending.includes('summary') && others.length > 0 && source.length > TWO_STAGE_CHARS) {
+      const summary = await run('summary', 'source', source)
+      outcomes.push(summary)
+      const base = summary.content ?? null
+      outcomes.push(...(await Promise.all(others.map((type) => (base ? run(type, 'summary', base) : run(type, 'source', source))))))
+    } else {
+      outcomes.push(...(await Promise.all(pending.map((type) => run(type, 'source', source)))))
+    }
 
-  for (const outcome of outcomes) {
-    if (outcome.content !== null) {
-      stored.push({ type: outcome.type, content: outcome.content })
-      results[outcome.type] = decode(outcome.type, outcome.content) ?? undefined
-    } else if (outcome.error) {
-      errors[outcome.type] = outcome.error
+    for (const outcome of outcomes) {
+      if (outcome.content !== null) stored.push({ type: outcome.type, content: outcome.content })
+      else if (outcome.error) errors[outcome.type] = outcome.error
     }
   }
+
+  const results: Partial<Record<GenerationType, string | QuizQuestion[] | KeyTerm[]>> = {}
+  for (const item of stored) results[item.type] = decode(item.type, item.content) ?? undefined
 
   const spent = neuronsOf(tracker)
   const usage = {
@@ -308,9 +343,10 @@ app.post('/api/generate', async (c) => {
     modelCalls: tracker.calls,
     neurons: Math.round(spent * 100) / 100
   }
+  const usageWrites = tracker.calls > 0 ? usageStatements(c.env.DB, owner, tracker) : []
 
   if (stored.length === 0) {
-    await c.env.DB.batch(usageStatements(c.env.DB, owner, tracker))
+    if (usageWrites.length) await c.env.DB.batch(usageWrites)
     return c.json({ error: 'Не вдалося згенерувати жодного результату', errors, usage }, 502)
   }
 
@@ -327,8 +363,15 @@ app.post('/api/generate', async (c) => {
         item.content
       )
     ),
-    ...usageStatements(c.env.DB, owner, tracker)
+    ...stored.filter((item) => !cachedTypes.includes(item.type)).map((item) => writeResult(c.env.DB, keys.get(item.type) as string, item.content)),
+    ...usageWrites
   ])
+
+  try {
+    c.executionCtx.waitUntil(pruneCache(c.env.DB))
+  } catch {
+    void 0
+  }
 
   return c.json(
     {
@@ -338,11 +381,57 @@ app.post('/api/generate', async (c) => {
       chunks,
       results,
       errors,
+      cached: cachedTypes,
       usage,
       quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit, resetsAt: nextResetAt() }
     },
     201
   )
+})
+
+app.post('/api/vision', async (c) => {
+  const { owner, limit, user } = await identify(c)
+  const body = await c.req.json().catch(() => null)
+  const image = body?.image
+  if (!validImage(image)) return c.json({ error: 'Зображення має бути JPEG у base64 розміром до 1,5 МБ' }, 400)
+
+  const hash = await sha256Hex(image)
+  const cached = await readImage(c.env.DB, hash)
+  const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
+  const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
+
+  if (cached !== null) {
+    return c.json({ description: cached, skipped: cached === '', cached: true, neurons: 0, quota: { used: quota.device.used, limit, resetsAt: nextResetAt() } })
+  }
+  if (quota.device.used >= limit) {
+    const error = user
+      ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
+      : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
+    return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
+  }
+  if (quota.global.used >= globalLimit) {
+    return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
+  }
+
+  const tracker = createTracker()
+  let description: string
+  try {
+    description = await describeImage(c.env.AI, image, tracker)
+  } catch (error) {
+    console.error('vision failed', error)
+    if (tracker.calls > 0) await c.env.DB.batch(usageStatements(c.env.DB, owner, tracker))
+    return c.json({ error: 'Не вдалося розпізнати зображення' }, 502)
+  }
+
+  const spent = neuronsOf(tracker)
+  await c.env.DB.batch([writeImage(c.env.DB, hash, description), ...usageStatements(c.env.DB, owner, tracker)])
+  return c.json({
+    description,
+    skipped: description === '',
+    cached: false,
+    neurons: Math.round(spent * 100) / 100,
+    quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit, resetsAt: nextResetAt() }
+  })
 })
 
 app.post('/api/auth/register', async (c) => {

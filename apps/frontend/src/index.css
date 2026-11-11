@@ -812,3 +812,8 @@ button:disabled {
     scroll-behavior: auto !important;
   }
 }
+
+.tool[aria-pressed='true'] {
+  color: var(--inv-fg);
+  background: color-mix(in srgb, var(--inv-fg) 14%, transparent);
+}

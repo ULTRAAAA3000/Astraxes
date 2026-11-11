@@ -55,3 +55,15 @@ CREATE TABLE IF NOT EXISTS login_failures (
 );
 
 CREATE INDEX IF NOT EXISTS idx_login_failures_email ON login_failures(email, at);
+
+CREATE TABLE IF NOT EXISTS result_cache (
+  key TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS image_cache (
+  hash TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

@@ -1,7 +1,13 @@
 export interface UsageTracker {
   promptTokens: number
   completionTokens: number
+  neurons: number
   calls: number
+}
+
+export interface Rates {
+  input: number
+  output: number
 }
 
 export interface QuotaSnapshot {
@@ -10,15 +16,16 @@ export interface QuotaSnapshot {
   global: { used: number; limit: number }
 }
 
-export const INPUT_NEURONS_PER_TOKEN = 4119 / 1_000_000
-export const OUTPUT_NEURONS_PER_TOKEN = 34868 / 1_000_000
+export const TEXT_RATES: Rates = { input: 4119 / 1_000_000, output: 34868 / 1_000_000 }
+export const VISION_RATES: Rates = { input: 4410 / 1_000_000, output: 61493 / 1_000_000 }
+export const IMAGE_TOKEN_ESTIMATE = 1600
 export const DEFAULT_GUEST_LIMIT = 50
 export const DEFAULT_USER_LIMIT = 550
 export const DEFAULT_GLOBAL_LIMIT = 9000
 export const GLOBAL_OWNER = '*'
 
 export function createTracker(): UsageTracker {
-  return { promptTokens: 0, completionTokens: 0, calls: 0 }
+  return { promptTokens: 0, completionTokens: 0, neurons: 0, calls: 0 }
 }
 
 export function estimateTokens(text: string): number {
@@ -26,16 +33,24 @@ export function estimateTokens(text: string): number {
 }
 
 export function neuronsOf(tracker: UsageTracker): number {
-  return tracker.promptTokens * INPUT_NEURONS_PER_TOKEN + tracker.completionTokens * OUTPUT_NEURONS_PER_TOKEN
+  return tracker.neurons
 }
 
-export function recordUsage(tracker: UsageTracker | undefined, result: unknown, inputText: string, outputText: string): void {
+export function recordUsage(
+  tracker: UsageTracker | undefined,
+  result: unknown,
+  inputText: string,
+  outputText: string,
+  rates: Rates = TEXT_RATES,
+  extraInput = 0
+): void {
   if (!tracker) return
   const usage = (result as { usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } } | null)?.usage
-  const prompt = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : estimateTokens(inputText)
+  const prompt = typeof usage?.prompt_tokens === 'number' ? usage.prompt_tokens : estimateTokens(inputText) + extraInput
   const completion = typeof usage?.completion_tokens === 'number' ? usage.completion_tokens : estimateTokens(outputText)
   tracker.promptTokens += prompt
   tracker.completionTokens += completion
+  tracker.neurons += prompt * rates.input + completion * rates.output
   tracker.calls += 1
 }
 

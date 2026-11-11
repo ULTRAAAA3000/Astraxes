@@ -1,9 +1,7 @@
 import type JSZip from 'jszip'
-
-export interface PptxResult {
-  text: string
-  note?: string
-}
+import { MAX_IMAGES, mergeText, visibleChars } from './blocks'
+import type { Block, FileBlocks, PreparedImage } from './blocks'
+import { mimeFromName, prepareBlob } from './images'
 
 export class PptxTextError extends Error {}
 
@@ -46,16 +44,25 @@ function shapeParagraphs(xml: string): string[] {
   return [...xml.matchAll(/<a:p(?:\s[^>]*)?>([\s\S]*?)<\/a:p>/g)].map((match) => paragraphText(match[1])).filter(Boolean)
 }
 
-function parseSlide(xml: string): { lines: string[]; pictures: number } {
+type SlideItem = { kind: 'text'; text: string } | { kind: 'image'; rid: string }
+
+function parseSlide(xml: string): { items: SlideItem[]; pictures: number } {
   const body = xml.replace(/<mc:Fallback>[\s\S]*?<\/mc:Fallback>/g, '')
   const title: string[] = []
-  const lines: string[] = []
+  const items: SlideItem[] = []
+  let pictures = 0
 
-  for (const [block] of body.matchAll(/<p:sp\b[\s\S]*?<\/p:sp>|<a:tbl\b[\s\S]*?<\/a:tbl>/g)) {
+  for (const [block] of body.matchAll(/<p:sp\b[\s\S]*?<\/p:sp>|<a:tbl\b[\s\S]*?<\/a:tbl>|<p:pic\b[\s\S]*?<\/p:pic>/g)) {
+    if (block.startsWith('<p:pic')) {
+      pictures++
+      const rid = /<a:blip\b[^>]*\br:embed="([^"]+)"/.exec(block)?.[1]
+      if (rid) items.push({ kind: 'image', rid })
+      continue
+    }
     if (block.startsWith('<a:tbl')) {
       for (const [row] of block.matchAll(/<a:tr\b[\s\S]*?<\/a:tr>/g)) {
         const cells = [...row.matchAll(/<a:tc\b[\s\S]*?<\/a:tc>/g)].map((cell) => shapeParagraphs(cell[0]).join(' ')).filter(Boolean)
-        if (cells.length) lines.push(cells.join(' | '))
+        if (cells.length) items.push({ kind: 'text', text: cells.join(' | ') })
       }
       continue
     }
@@ -63,10 +70,10 @@ function parseSlide(xml: string): { lines: string[]; pictures: number } {
     if (type && SKIPPED_PLACEHOLDERS.has(type)) continue
     const paragraphs = shapeParagraphs(block)
     if (type && TITLE_PLACEHOLDERS.has(type)) title.push(...paragraphs)
-    else lines.push(...paragraphs)
+    else for (const paragraph of paragraphs) items.push({ kind: 'text', text: paragraph })
   }
 
-  return { lines: [...title, ...lines], pictures: (body.match(/<p:pic\b/g) ?? []).length }
+  return { items: [...title.map((text) => ({ kind: 'text' as const, text })), ...items], pictures }
 }
 
 function slideNumber(path: string): number {
@@ -96,16 +103,42 @@ async function slideOrder(zip: JSZip): Promise<string[]> {
   return files.sort((a, b) => slideNumber(a) - slideNumber(b))
 }
 
-export async function parsePptx(zip: JSZip): Promise<PptxResult> {
+const MAX_REUSE = 2
+
+async function slideRelations(zip: JSZip, slidePath: string): Promise<Map<string, string>> {
+  const name = slidePath.split('/').pop() ?? ''
+  const rels = await zip.file(`ppt/slides/_rels/${name}.rels`)?.async('string')
+  const targets = new Map<string, string>()
+  if (!rels) return targets
+  for (const [tag] of rels.matchAll(/<Relationship\b[^>]*>/g)) {
+    const id = /\bId="([^"]+)"/.exec(tag)?.[1]
+    const target = /\bTarget="([^"]+)"/.exec(tag)?.[1]
+    if (!id || !target || /TargetMode="External"/.test(tag)) continue
+    const parts = (target.startsWith('/') ? target.slice(1) : `ppt/slides/${target}`).split('/')
+    const resolved: string[] = []
+    for (const part of parts) {
+      if (part === '..') resolved.pop()
+      else if (part !== '.') resolved.push(part)
+    }
+    targets.set(id, resolved.join('/'))
+  }
+  return targets
+}
+
+export async function parsePptx(zip: JSZip, withImages: boolean): Promise<FileBlocks> {
   const paths = (await slideOrder(zip)).slice(0, MAX_SLIDES)
   if (!paths.length) {
     throw new PptxTextError('Не вдалося знайти слайди. Файл пошкоджений або це не презентація .pptx')
   }
 
-  const slides: string[] = []
+  const blocks: Block[] = []
+  const media = new Map<string, PreparedImage | null>()
+  const reuse = new Map<string, number>()
   let total = 0
   let imageOnly = 0
   let pictures = 0
+  let images = 0
+  let dropped = 0
 
   for (const path of paths) {
     const xml = (await zip.file(path)?.async('string')) ?? ''
@@ -113,23 +146,57 @@ export async function parsePptx(zip: JSZip): Promise<PptxResult> {
     total++
     const slide = parseSlide(xml)
     pictures += slide.pictures
-    const text = slide.lines.join('\n')
-    if (visibleLength(text) < MIN_SLIDE_CHARS) {
+    const relations = withImages ? await slideRelations(zip, path) : new Map<string, string>()
+    const slideBlocks: Block[] = []
+
+    for (const item of slide.items) {
+      if (item.kind === 'text') {
+        slideBlocks.push({ type: 'text', text: item.text })
+        continue
+      }
+      if (!withImages) continue
+      const target = relations.get(item.rid)
+      if (!target || !mimeFromName(target)) continue
+      const uses = (reuse.get(target) ?? 0) + 1
+      reuse.set(target, uses)
+      if (uses > MAX_REUSE) continue
+      if (images >= MAX_IMAGES) {
+        dropped++
+        continue
+      }
+      if (!media.has(target)) {
+        const bytes = await zip.file(target)?.async('uint8array')
+        media.set(target, bytes ? await prepareBlob(new Blob([bytes as BlobPart], { type: mimeFromName(target) })) : null)
+      }
+      const image = media.get(target)
+      if (image && uses === 1) {
+        slideBlocks.push({ type: 'image', image })
+        images++
+      }
+    }
+
+    const slideChars = visibleChars(slideBlocks)
+    const hasImage = slideBlocks.some((block) => block.type === 'image')
+    if (slideChars < MIN_SLIDE_CHARS && !hasImage) {
       if (slide.pictures > 0) imageOnly++
       continue
     }
-    slides.push(text)
+    blocks.push(...mergeText(slideBlocks))
   }
 
-  if (!slides.length) {
-    throw new PptxTextError('У презентації немає тексту: слайди складаються із зображень. Обробити зображення неможливо')
+  const hasContent = visibleChars(blocks) >= MIN_SLIDE_CHARS || blocks.some((block) => block.type === 'image')
+  if (!hasContent) {
+    throw new PptxTextError(
+      withImages
+        ? 'У презентації не знайдено тексту й зображень, які можна обробити'
+        : 'У презентації немає тексту: слайди складаються із зображень. Увімкніть розпізнавання зображень, щоб обробити її'
+    )
   }
 
-  if (imageOnly > 0) {
-    return { text: slides.join('\n\n'), note: `${imageOnly} з ${total} слайдів без тексту (зображення) пропущено` }
+  if (withImages) {
+    return dropped > 0 ? { blocks, note: `розпізнано перші ${MAX_IMAGES} зображень, решту пропущено` } : { blocks }
   }
-  if (pictures > 0) {
-    return { text: slides.join('\n\n'), note: 'зображення на слайдах проігноровано' }
-  }
-  return { text: slides.join('\n\n') }
+  if (imageOnly > 0) return { blocks, note: `${imageOnly} з ${total} слайдів без тексту (зображення) пропущено` }
+  if (pictures > 0) return { blocks, note: 'зображення на слайдах проігноровано' }
+  return { blocks }
 }

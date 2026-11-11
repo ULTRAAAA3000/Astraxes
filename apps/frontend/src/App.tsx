@@ -3,7 +3,9 @@ import type { ChangeEvent, DragEvent, KeyboardEvent } from 'react'
 import { ALL_TYPES, HARD_LIMIT, MIN_CHARS, QUESTION_OPTIONS, SESSION_EXPIRED_EVENT, SOFT_LIMIT, TYPE_LABELS, availableTabs, countWords, estimateTokens, formatDate, request, setToken } from './lib/api'
 import type { Account, Doc, GenType, GenerateResponse, HistoryDetail, HistoryItem, UsageInfo } from './lib/api'
 import { SAMPLE_TEXT } from './lib/sample'
-import { ACCEPT, extractFileText } from './lib/files'
+import { ACCEPT, blocksToText, extractFile } from './lib/files'
+import { countImages } from './lib/blocks'
+import { describeBlocks } from './lib/vision'
 import { Icon } from './components/Icons'
 import type { IconName } from './components/Icons'
 import SummaryView from './components/SummaryView'
@@ -25,6 +27,7 @@ interface Toast {
 
 const DRAFT_KEY = 'astraxes:draft'
 const THEME_KEY = 'astraxes:theme'
+const IMAGES_KEY = 'astraxes:images'
 const TYPE_ICONS: Record<GenType, IconName> = { summary: 'doc', retelling: 'lines', test: 'check-list', terms: 'tag' }
 const STEP_LABELS: Record<GenType, string> = {
   summary: 'Складаю конспект',
@@ -106,6 +109,15 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme)
   const [dragging, setDragging] = useState(false)
   const [reading, setReading] = useState(false)
+  const [readingLabel, setReadingLabel] = useState('Читаю файл…')
+  const [imagesOn, setImagesOn] = useState(() => {
+    try {
+      return localStorage.getItem(IMAGES_KEY) !== '0'
+    } catch {
+      return true
+    }
+  })
+  const lastRun = useRef('')
   const [toasts, setToasts] = useState<Toast[]>([])
   const resultRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -214,10 +226,18 @@ export default function App() {
     setError(null)
     requestAnimationFrame(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     try {
+      const runKey = JSON.stringify([text, chosenTypes, selected.test ? questionCount : 0])
       const data = await request<GenerateResponse>('/api/generate', {
         method: 'POST',
-        body: JSON.stringify({ title: title.trim() || undefined, text, types: chosenTypes, questionCount: selected.test ? questionCount : undefined })
+        body: JSON.stringify({
+          title: title.trim() || undefined,
+          text,
+          types: chosenTypes,
+          questionCount: selected.test ? questionCount : undefined,
+          fresh: lastRun.current === runKey || undefined
+        })
       })
+      lastRun.current = runKey
       showDoc({
         id: data.documentId,
         title: data.title,
@@ -266,17 +286,43 @@ export default function App() {
     }
   }
 
+  const toggleImages = () => {
+    const next = !imagesOn
+    setImagesOn(next)
+    try {
+      localStorage.setItem(IMAGES_KEY, next ? '1' : '0')
+    } catch {
+      return
+    }
+  }
+
   const readFile = async (file: File) => {
     setReading(true)
+    setReadingLabel('Читаю файл…')
     try {
-      const { text: content, note } = await extractFileText(file)
+      const { blocks, note } = await extractFile(file, imagesOn)
+      const parts = [`Завантажено: ${file.name}`]
+      let content: string
+      const images = countImages(blocks)
+
+      if (images > 0) {
+        setReadingLabel(`Розпізнаю зображення 0/${images}`)
+        const described = await describeBlocks(blocks, (done, total) => setReadingLabel(`Розпізнаю зображення ${done}/${total}`))
+        content = described.text
+        if (described.recognized > 0) parts.push(`розпізнано зображень: ${described.recognized}`)
+        if (described.failed > 0) parts.push(`не розпізнано: ${described.failed}`)
+        if (described.stopped) parts.push(described.stopped)
+        loadUsage()
+      } else {
+        content = blocksToText(blocks)
+      }
+
       if (!content) {
-        notify('У файлі не знайдено тексту. Якщо там лише зображення, обробити їх неможливо')
+        notify(images > 0 ? 'Не вдалося отримати текст із зображень. Спробуйте ще раз або вставте текст вручну' : 'У файлі не знайдено тексту')
         return
       }
       setText(content.slice(0, HARD_LIMIT))
       if (!title.trim()) setTitle(file.name.replace(/\.[^.]+$/, '').slice(0, 120))
-      const parts = [`Завантажено: ${file.name}`]
       if (content.length > HARD_LIMIT) parts.push(`використано перші ${HARD_LIMIT} символів`)
       if (note) parts.push(note)
       notify(parts.join(' · '))
@@ -584,7 +630,7 @@ export default function App() {
               <div className="flex flex-wrap items-center gap-1">
                 <button type="button" onClick={() => fileRef.current?.click()} disabled={reading} className="tool" aria-label="Завантажити файл" title="Завантажити файл">
                   {reading ? <span className="spinner" /> : <Icon name="upload" />}
-                  <span className={reading ? '' : 'hidden sm:inline'}>{reading ? 'Читаю файл…' : 'Файл'}</span>
+                  <span className={reading ? '' : 'hidden sm:inline'}>{reading ? readingLabel : 'Файл'}</span>
                 </button>
                 <button type="button" onClick={pasteText} className="tool" aria-label="Вставити з буфера обміну" title="Вставити з буфера обміну">
                   <Icon name="paste" />
@@ -597,6 +643,17 @@ export default function App() {
                 <button type="button" onClick={clearInput} disabled={!text && !title} className="tool" aria-label="Очистити поле" title="Очистити поле">
                   <Icon name="trash" />
                   <span className="hidden sm:inline">Очистити</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleImages}
+                  aria-pressed={imagesOn}
+                  className="tool"
+                  aria-label="Розпізнавати зображення у файлах"
+                  title="Розпізнавати зображення у файлах. Кожне зображення витрачає частину денного ліміту"
+                >
+                  <Icon name="image" />
+                  <span className="hidden sm:inline">Зображення</span>
                 </button>
                 <input ref={fileRef} type="file" accept={ACCEPT} onChange={onFileChange} className="hidden" />
               </div>

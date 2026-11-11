@@ -28,7 +28,7 @@ export const MAX_FORMULA_WORDS = 45
 export const QUIZ_QUESTION_COUNT = 4
 export const MIN_QUESTIONS = 4
 export const MAX_QUESTIONS = 10
-export const MAX_ATTEMPTS = 3
+export const MAX_ATTEMPTS = 2
 export const MIN_TERMS = 3
 export const MAX_TERMS = 12
 
@@ -45,6 +45,7 @@ const BASE_RULES = `Ти — академічний асистент "Astraxes �
 ВАЖЛИВІСТЬ: уважно оціни, що в тексті найважливіше для розуміння теми: закони, правила, формули, визначення, ключові дати та причинно-наслідкові зв'язки. Їм приділяй найбільше уваги й місця. Другорядні подробиці, приклади й відступи скорочуй або пропускай.
 ФОРМУЛИ: якщо в тексті є формули, рівняння, закони чи обчислення, обов'язково включай їх у результат точно так, як у тексті, нічого не змінюючи й не округлюючи. Біля формули коротко поясни, що означають її величини й коли її застосовують. Записуй формули звичайним текстом і символами Unicode (наприклад: E = mc², a² + b² = c², v = s / t, x₁ + x₂ = −b / a). Не використовуй LaTeX, символ "\\" і знак "$".
 Пиши природно й по суті, як уважний викладач. Не копіюй речення з тексту дослівно без потреби.
+Фрагменти у квадратних дужках "[Зображення: …]" — це описи ілюстрацій, схем, таблиць і фото з документа в тому місці, де вони стоять. Вважай їх повноцінною частиною тексту: використовуй дані з них, формули й підписи, але не згадуй слова "зображення" без потреби.
 Мова відповіді збігається з мовою вихідного тексту.
 Не пиши вступів, привітань і зайвих пояснень. Видай лише результат у потрібному форматі.`
 
@@ -137,10 +138,13 @@ export function prepareSource(text: string): string {
   return cleaned.length > MAX_SOURCE_CHARS ? cleaned.slice(0, MAX_SOURCE_CHARS) : cleaned
 }
 
-function userPrompt(source: string): ChatMessage {
+export type Material = 'source' | 'summary'
+
+function userPrompt(source: string, material: Material = 'source'): ChatMessage {
+  const label = material === 'summary' ? 'Конспект тексту (містить усі важливі факти й формули)' : 'Вихідний текст'
   return {
     role: 'user',
-    content: `Вихідний текст:\n"""\n${source}\n"""\n\nВиконай завдання строго за шаблоном.`
+    content: `${label}:\n"""\n${source}\n"""\n\nВиконай завдання строго за шаблоном.`
   }
 }
 
@@ -148,23 +152,28 @@ export function buildSummaryMessages(text: string): ChatMessage[] {
   return [{ role: 'system', content: SUMMARY_RULES }, userPrompt(prepareSource(text))]
 }
 
-export function buildTestMessages(text: string, count: number = QUIZ_QUESTION_COUNT): ChatMessage[] {
-  return [{ role: 'system', content: testRules(count) }, userPrompt(prepareSource(text))]
+export function buildTestMessages(text: string, count: number = QUIZ_QUESTION_COUNT, material: Material = 'source'): ChatMessage[] {
+  return [{ role: 'system', content: testRules(count) }, userPrompt(prepareSource(text), material)]
 }
 
-export function buildRetellingMessages(text: string): ChatMessage[] {
-  return [{ role: 'system', content: RETELLING_RULES }, userPrompt(prepareSource(text))]
+export function buildRetellingMessages(text: string, material: Material = 'source'): ChatMessage[] {
+  return [{ role: 'system', content: RETELLING_RULES }, userPrompt(prepareSource(text), material)]
 }
 
-export function buildTermsMessages(text: string): ChatMessage[] {
-  return [{ role: 'system', content: TERMS_RULES }, userPrompt(prepareSource(text))]
+export function buildTermsMessages(text: string, material: Material = 'source'): ChatMessage[] {
+  return [{ role: 'system', content: TERMS_RULES }, userPrompt(prepareSource(text), material)]
 }
 
-export function buildMessages(type: GenerationType, text: string, count: number = QUIZ_QUESTION_COUNT): ChatMessage[] {
+export function buildMessages(
+  type: GenerationType,
+  text: string,
+  count: number = QUIZ_QUESTION_COUNT,
+  material: Material = 'source'
+): ChatMessage[] {
   if (type === 'summary') return buildSummaryMessages(text)
-  if (type === 'retelling') return buildRetellingMessages(text)
-  if (type === 'test') return buildTestMessages(text, count)
-  return buildTermsMessages(text)
+  if (type === 'retelling') return buildRetellingMessages(text, material)
+  if (type === 'test') return buildTestMessages(text, count, material)
+  return buildTermsMessages(text, material)
 }
 
 function stripFences(raw: string): string {
@@ -290,7 +299,7 @@ export function parseRetelling(raw: string): string {
   return lastStop > clipped.length * 0.5 ? clipped.slice(0, lastStop + 1) : `${clipped}…`
 }
 
-export function parseQuiz(raw: string, count: number = QUIZ_QUESTION_COUNT): QuizQuestion[] {
+function collectQuiz(raw: string, count: number): { questions: QuizQuestion[]; problem: string } {
   const data = extractJsonArray(raw)
   if (!Array.isArray(data)) {
     throw new GenerationError('Відповідь не містить JSON-масив')
@@ -298,7 +307,7 @@ export function parseQuiz(raw: string, count: number = QUIZ_QUESTION_COUNT): Qui
 
   const questions: QuizQuestion[] = []
   const seen = new Set<string>()
-  let firstProblem = ''
+  let problem = ''
 
   data.forEach((item, index) => {
     if (questions.length >= count) return
@@ -309,12 +318,17 @@ export function parseQuiz(raw: string, count: number = QUIZ_QUESTION_COUNT): Qui
       seen.add(key)
       questions.push(question)
     } catch (error) {
-      if (!firstProblem && error instanceof Error) firstProblem = error.message
+      if (!problem && error instanceof Error) problem = error.message
     }
   })
 
+  return { questions, problem }
+}
+
+export function parseQuiz(raw: string, count: number = QUIZ_QUESTION_COUNT): QuizQuestion[] {
+  const { questions, problem } = collectQuiz(raw, count)
   if (questions.length < count) {
-    const detail = firstProblem ? `. ${firstProblem}` : ''
+    const detail = problem ? `. ${problem}` : ''
     throw new GenerationError(`Тест має містити ${count} коректних питань, отримано ${questions.length}${detail}`)
   }
   return questions
@@ -378,14 +392,56 @@ export async function callModel(
   return text
 }
 
+async function generateQuiz(
+  ai: Ai,
+  text: string,
+  count: number,
+  material: Material,
+  tracker?: UsageTracker
+): Promise<string> {
+  const kept: QuizQuestion[] = []
+  const known = new Set<string>()
+  let lastError = 'Невідома помилка'
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const missing = count - kept.length
+    const messages = buildTestMessages(text, missing, material)
+    if (kept.length) {
+      const list = kept.map((item) => `- ${item.question}`).join('\n')
+      messages[1].content += `\n\nЦі питання вже складені, не повторюй їх і не дублюй їхню тему:\n${list}`
+    }
+    let raw = ''
+    try {
+      raw = await callModel(ai, messages, maxTokensFor('test', missing), attempt === 1 ? 0.35 : 0.2, tracker)
+      const { questions, problem } = collectQuiz(raw, missing)
+      for (const question of questions) {
+        const key = question.question.toLowerCase()
+        if (known.has(key)) continue
+        known.add(key)
+        kept.push(question)
+      }
+      if (kept.length >= count) return JSON.stringify(kept.slice(0, count))
+      lastError = `Тест має містити ${count} коректних питань, отримано ${kept.length}${problem ? `. ${problem}` : ''}`
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
+    console.error(`generate test attempt ${attempt} failed: ${lastError}`, raw.slice(0, 400))
+  }
+
+  throw new GenerationError(`Не вдалося отримати коректну відповідь моделі: ${lastError}`)
+}
+
 export async function generateContent(
   ai: Ai,
   type: GenerationType,
   text: string,
-  options: { questionCount?: number; tracker?: UsageTracker } = {}
+  options: { questionCount?: number; tracker?: UsageTracker; material?: Material } = {}
 ): Promise<string> {
   const count = options.questionCount ?? QUIZ_QUESTION_COUNT
-  const messages = buildMessages(type, text, count)
+  const material = options.material ?? 'source'
+  if (type === 'test') return generateQuiz(ai, text, count, material, options.tracker)
+
+  const messages = buildMessages(type, text, count, material)
   let lastError = 'Невідома помилка'
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

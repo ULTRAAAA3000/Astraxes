@@ -21,8 +21,16 @@ export type IconName =
   | 'undo'
   | 'menu'
   | 'lines'
+  | 'image'
 
 const PATHS: Record<IconName, ReactNode> = {
+  image: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="10" r="1.6" />
+      <path d="m21 16-5-5-8 9" />
+    </>
+  ),
   sun: (
     <>
       <circle cx="12" cy="12" r="4" />

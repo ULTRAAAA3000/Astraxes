@@ -80,6 +80,7 @@ export interface GenerateResponse {
   usage: Usage
   results: Results
   errors: Partial<Record<GenType, string>>
+  cached?: GenType[]
 }
 
 export interface HistoryDetail {
