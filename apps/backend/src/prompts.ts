@@ -32,6 +32,96 @@ export const MAX_ATTEMPTS = 2
 export const MIN_TERMS = 3
 export const MAX_TERMS = 12
 
+export type Mode = 'low' | 'medium' | 'high'
+export const MODES: Mode[] = ['low', 'medium', 'high']
+
+interface Level {
+  summaryVolume: string
+  thesisWords: number
+  minBullets: number
+  summaryTokens: number
+  retellingSentences: string
+  retellingWords: number
+  retellingTokens: number
+  termsRange: string
+  minTerms: number
+  maxTerms: number
+  termWords: number
+  termsTokens: number
+  quizStyle: string
+  explanation: string
+  questionTokens: number
+  questionBase: number
+  quizCap: number
+}
+
+const LEVELS: Record<Mode, Level> = {
+  low: {
+    summaryVolume:
+      'СТИСЛИЙ конспект: лише найголовніше. 2–3 розділи, у кожному 2–3 короткі тези до 15 слів. Підрозділи не створюй (окрім "### Формули", якщо вони є). Приклади й другорядне пропускай.',
+    thesisWords: 16,
+    minBullets: 3,
+    summaryTokens: 900,
+    retellingSentences: '2–3 речення',
+    retellingWords: 70,
+    retellingTokens: 350,
+    termsRange: '3–6 об\'єктів лише найголовніших понять',
+    minTerms: 3,
+    maxTerms: 6,
+    termWords: 15,
+    termsTokens: 1200,
+    quizStyle: 'Питання прості: перевіряють розуміння основних понять і фактів.',
+    explanation: 'одне коротке речення',
+    questionTokens: 300,
+    questionBase: 700,
+    quizCap: 4096
+  },
+  medium: {
+    summaryVolume:
+      'ЗБАЛАНСОВАНИЙ конспект: кілька змістовних розділів, у кожному зазвичай 3–6 тез до 20 слів. Підрозділи за потреби.',
+    thesisWords: 25,
+    minBullets: 3,
+    summaryTokens: 2500,
+    retellingSentences: '4–8 речень',
+    retellingWords: 180,
+    retellingTokens: 900,
+    termsRange: '5–12 об\'єктів, кількість обери залежно від насиченості тексту',
+    minTerms: 3,
+    maxTerms: 12,
+    termWords: 25,
+    termsTokens: 4096,
+    quizStyle: 'Питання різної складності: від визначень до застосування понять.',
+    explanation: 'одне-два короткі речення',
+    questionTokens: 420,
+    questionBase: 1200,
+    quizCap: 6144
+  },
+  high: {
+    summaryVolume:
+      'ДЕТАЛЬНИЙ конспект: розгорнутий і повний. 5–10 розділів, підрозділи "### " там, де вони структурують матеріал, у кожному 4–8 тез до 35 слів. Включай визначення, причини й наслідки, умови застосування формул, винятки, порівняння, хронологію та ілюстративні приклади. Важливе не скорочуй.',
+    thesisWords: 35,
+    minBullets: 6,
+    summaryTokens: 4096,
+    retellingSentences: '8–14 речень у кількох абзацах',
+    retellingWords: 320,
+    retellingTokens: 1500,
+    termsRange: '10–20 об\'єктів, охопи всі значущі поняття, імена, дати й формули',
+    minTerms: 5,
+    maxTerms: 20,
+    termWords: 35,
+    termsTokens: 5500,
+    quizStyle: 'Питання від простих до складних: включай застосування понять, порівняння, причинно-наслідкові зв\'язки й міркування.',
+    explanation: 'два-три речення: чому правильна відповідь вірна й у чому типова помилка',
+    questionTokens: 560,
+    questionBase: 1400,
+    quizCap: 7168
+  }
+}
+
+export function levelOf(mode: Mode): Level {
+  return LEVELS[mode]
+}
+
 export class GenerationError extends Error {
   constructor(message: string) {
     super(message)
@@ -49,7 +139,8 @@ const BASE_RULES = `Ти — академічний асистент "Astraxes �
 Мова відповіді збігається з мовою вихідного тексту.
 Не пиши вступів, привітань і зайвих пояснень. Видай лише результат у потрібному форматі.`
 
-const SUMMARY_RULES = `${BASE_RULES}
+function summaryRules(mode: Mode): string {
+  return `${BASE_RULES}
 
 ЗАВДАННЯ: скласти академічний конспект.
 
@@ -58,29 +149,34 @@ const SUMMARY_RULES = `${BASE_RULES}
 ## Розділи: кілька змістовних розділів за підтемами тексту. Якщо доречно, перший розділ — "Ключові поняття".
 ### Підрозділи: за потреби, з назвами, що підходять до змісту (наприклад Визначення, Хронологія, Формули, Причини та наслідки, Етапи). Не створюй порожніх підрозділів.
 
+ОБСЯГ: ${LEVELS[mode].summaryVolume}
+
 ПРАВИЛА:
 1. Рівно один заголовок "# " і щонайменше один "## ".
 2. Під заголовками — марковані тези з префіксом "- ", кожна з нового рядка.
-3. Теза — одна завершена думка, зазвичай до 20 слів. Краще чітке коротке речення, ніж обірване.
+3. Теза — одна завершена думка, до ${LEVELS[mode].thesisWords} слів. Краще чітке речення, ніж обірване.
 4. Залишай головне: визначення, факти, дати, формули, причини та наслідки, важливі зв'язки між поняттями. Прибирай воду й повтори.
 5. Розташовуй матеріал за важливістю: найважливіше вище, на нього віддай більше тез. Другорядне стисни до однієї тези або пропусти.
 6. Кожну формулу з тексту винеси в окрему тезу у вигляді "- Формула: E = mc² — пояснення величин і сенсу" (до 40 слів). Якщо формул кілька, зроби підрозділ "### Формули". Жодну формулу не пропускай.
 7. Короткий приклад чи порівняння можна залишити, якщо він допомагає зрозуміти суть.
 8. Не використовуй таблиці, нумеровані списки, жирний шрифт і блоки коду.`
+}
 
-const RETELLING_RULES = `${BASE_RULES}
+function retellingRules(mode: Mode): string {
+  return `${BASE_RULES}
 
 ЗАВДАННЯ: скласти стислий переказ тексту.
 
 ПРАВИЛА:
-1. Зв'язний текст із 4–8 речень, не більше ${MAX_RETELLING_WORDS} слів.
+1. Зв'язний текст із ${LEVELS[mode].retellingSentences}, не більше ${LEVELS[mode].retellingWords} слів.
 2. Передай головну думку, ключові факти та висновок у логічному порядку, своїми словами. Найважливішому дай більше місця, другорядне опусти.
 3. Якщо в тексті є ключова формула чи закон, наведи її в переказі точно, із коротким поясненням.
 4. Без заголовків, списків, таблиць і жирного шрифту.
 5. Не додавай власних оцінок і фактів, яких немає у вихідному тексті.
 6. Стиль нейтральний, живий, зрозумілий учневі.`
+}
 
-function testRules(count: number): string {
+function testRules(count: number, mode: Mode): string {
   return `${BASE_RULES}
 
 ЗАВДАННЯ: скласти тест для самоперевірки.
@@ -90,6 +186,7 @@ function testRules(count: number): string {
 ЗМІСТ ПИТАНЬ:
 - Перевіряй розуміння найважливішого в тексті, а не дрібниць. Чим важливіша тема, тим більше питань про неї.
 - Якщо в тексті є формули, обов'язково додай питання на формули: яка формула описує закон, що означає величина, який результат за підстановки чисел, як виразити одну величину через іншу. Формули в питаннях і варіантах записуй точно за текстом, звичайним текстом із символами Unicode, без LaTeX і без символу "\\".
+- ${LEVELS[mode].quizStyle}
 - Різноманіть типи: визначення, причини й наслідки, факти (дати, числа, імена), порівняння, застосування понять. Розподіл обирай сам залежно від тексту.
 - Формулюй питання по-різному, не починай усі однаково.
 
@@ -97,7 +194,7 @@ function testRules(count: number): string {
 - "question": рядок з текстом питання.
 - "options": масив рівно з 4 різних рядків. Без префіксів "А)", "1." тощо.
 - "correctIndex": ціле число від 0 до 3, індекс правильного варіанта в "options".
-- "explanation": одне-два короткі речення, чому відповідь правильна.
+- "explanation": ${LEVELS[mode].explanation}, чому відповідь правильна.
 
 ПРАВИЛА:
 1. Правильний варіант лише один, решта правдоподібні (типові помилки учня), але неправильні згідно з текстом.
@@ -110,15 +207,16 @@ function testRules(count: number): string {
 [{"question":"Текст питання","options":["Варіант 1","Варіант 2","Варіант 3","Варіант 4"],"correctIndex":2,"explanation":"Коротке пояснення"}]`
 }
 
-const TERMS_RULES = `${BASE_RULES}
+function termsRules(mode: Mode): string {
+  return `${BASE_RULES}
 
 ЗАВДАННЯ: виділити ключові терміни.
 
-ФОРМАТ ВІДПОВІДІ: строго валідний JSON-масив із 5–12 об'єктів, кількість обери залежно від насиченості тексту. Жодного тексту до або після масиву, жодних блоків коду та markdown.
+ФОРМАТ ВІДПОВІДІ: строго валідний JSON-масив із ${LEVELS[mode].termsRange}. Жодного тексту до або після масиву, жодних блоків коду та markdown.
 
 ПОЛЯ КОЖНОГО ОБ'ЄКТА:
 - "term": рядок, сам термін, поняття або ім'я.
-- "definition": рядок, пояснення за змістом тексту, одне-два речення, до ${MAX_THESIS_WORDS} слів. Для формули чи закону запиши саму формулу точно за текстом, звичайним текстом із символами Unicode, і коротко поясни величини (до ${MAX_FORMULA_WORDS} слів).
+- "definition": рядок, пояснення за змістом тексту, одне-два речення, до ${LEVELS[mode].termWords} слів. Для формули чи закону запиши саму формулу точно за текстом, звичайним текстом із символами Unicode, і коротко поясни величини (до ${MAX_FORMULA_WORDS} слів).
 
 ПРАВИЛА:
 1. Лише те, що важливе для розуміння теми й є у вихідному тексті. Спершу найважливіші поняття.
@@ -128,6 +226,7 @@ const TERMS_RULES = `${BASE_RULES}
 
 ЗРАЗОК ФОРМИ (значення заміни своїми):
 [{"term":"Термін","definition":"Коротке визначення"}]`
+}
 
 export function normalizeInput(text: string): string {
   return text.replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
@@ -148,32 +247,38 @@ function userPrompt(source: string, material: Material = 'source'): ChatMessage 
   }
 }
 
-export function buildSummaryMessages(text: string): ChatMessage[] {
-  return [{ role: 'system', content: SUMMARY_RULES }, userPrompt(prepareSource(text))]
+export function buildSummaryMessages(text: string, mode: Mode = 'medium'): ChatMessage[] {
+  return [{ role: 'system', content: summaryRules(mode) }, userPrompt(prepareSource(text))]
 }
 
-export function buildTestMessages(text: string, count: number = QUIZ_QUESTION_COUNT, material: Material = 'source'): ChatMessage[] {
-  return [{ role: 'system', content: testRules(count) }, userPrompt(prepareSource(text), material)]
+export function buildTestMessages(
+  text: string,
+  count: number = QUIZ_QUESTION_COUNT,
+  material: Material = 'source',
+  mode: Mode = 'medium'
+): ChatMessage[] {
+  return [{ role: 'system', content: testRules(count, mode) }, userPrompt(prepareSource(text), material)]
 }
 
-export function buildRetellingMessages(text: string, material: Material = 'source'): ChatMessage[] {
-  return [{ role: 'system', content: RETELLING_RULES }, userPrompt(prepareSource(text), material)]
+export function buildRetellingMessages(text: string, material: Material = 'source', mode: Mode = 'medium'): ChatMessage[] {
+  return [{ role: 'system', content: retellingRules(mode) }, userPrompt(prepareSource(text), material)]
 }
 
-export function buildTermsMessages(text: string, material: Material = 'source'): ChatMessage[] {
-  return [{ role: 'system', content: TERMS_RULES }, userPrompt(prepareSource(text), material)]
+export function buildTermsMessages(text: string, material: Material = 'source', mode: Mode = 'medium'): ChatMessage[] {
+  return [{ role: 'system', content: termsRules(mode) }, userPrompt(prepareSource(text), material)]
 }
 
 export function buildMessages(
   type: GenerationType,
   text: string,
   count: number = QUIZ_QUESTION_COUNT,
-  material: Material = 'source'
+  material: Material = 'source',
+  mode: Mode = 'medium'
 ): ChatMessage[] {
-  if (type === 'summary') return buildSummaryMessages(text)
-  if (type === 'retelling') return buildRetellingMessages(text, material)
-  if (type === 'test') return buildTestMessages(text, count, material)
-  return buildTermsMessages(text, material)
+  if (type === 'summary') return buildSummaryMessages(text, mode)
+  if (type === 'retelling') return buildRetellingMessages(text, material, mode)
+  if (type === 'test') return buildTestMessages(text, count, material, mode)
+  return buildTermsMessages(text, material, mode)
 }
 
 function stripFences(raw: string): string {
@@ -216,7 +321,7 @@ function extractJsonArray(raw: string): unknown {
   throw new GenerationError('Відповідь містить невалідний JSON')
 }
 
-export function parseSummary(raw: string): string {
+export function parseSummary(raw: string, limits: { thesisWords: number; minBullets: number } = LEVELS.medium): string {
   const lines = stripFences(raw).split('\n')
   const out: string[] = []
   let h1 = 0
@@ -241,13 +346,13 @@ export function parseSummary(raw: string): string {
       const body = trimmed.replace(/^([-*•]\s*)+/, '').replace(/^\d+[.)]\s*/, '').replace(/\*\*/g, '')
       if (!body) continue
       bullets++
-      out.push(`- ${limitWords(body, wordLimitFor(body, MAX_THESIS_WORDS))}`)
+      out.push(`- ${limitWords(body, wordLimitFor(body, limits.thesisWords))}`)
     }
   }
 
   if (h1 !== 1) throw new GenerationError('Конспект має містити рівно один заголовок "# "')
   if (h2 < 1) throw new GenerationError('Конспект має містити розділ "## Ключові поняття"')
-  if (bullets < 3) throw new GenerationError('Конспект містить замало тез')
+  if (bullets < limits.minBullets) throw new GenerationError('Конспект містить замало тез')
 
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
@@ -278,7 +383,7 @@ function readQuestion(item: unknown, number: number): QuizQuestion {
   }
 }
 
-export function parseRetelling(raw: string): string {
+export function parseRetelling(raw: string, maxWords: number = MAX_RETELLING_WORDS): string {
   const cleaned = stripFences(raw)
     .split('\n')
     .map((line) => line.replace(/^\s*(?:#{1,6}\s+|[-*•]\s+|\d+[.)]\s+)/, '').replace(/\*\*/g, '').trim())
@@ -292,9 +397,9 @@ export function parseRetelling(raw: string): string {
   }
 
   const words = cleaned.split(' ')
-  if (words.length <= MAX_RETELLING_WORDS) return cleaned
+  if (words.length <= maxWords) return cleaned
 
-  const clipped = words.slice(0, MAX_RETELLING_WORDS).join(' ')
+  const clipped = words.slice(0, maxWords).join(' ')
   const lastStop = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf('! '), clipped.lastIndexOf('? '))
   return lastStop > clipped.length * 0.5 ? clipped.slice(0, lastStop + 1) : `${clipped}…`
 }
@@ -334,7 +439,7 @@ export function parseQuiz(raw: string, count: number = QUIZ_QUESTION_COUNT): Qui
   return questions
 }
 
-export function parseTerms(raw: string): KeyTerm[] {
+export function parseTerms(raw: string, level: { minTerms: number; maxTerms: number; termWords: number } = LEVELS.medium): KeyTerm[] {
   const data = extractJsonArray(raw)
   if (!Array.isArray(data)) {
     throw new GenerationError('Відповідь не містить JSON-масив')
@@ -349,28 +454,30 @@ export function parseTerms(raw: string): KeyTerm[] {
     const key = term.trim().toLowerCase()
     if (seen.has(key)) continue
     seen.add(key)
-    terms.push({ term: term.trim(), definition: limitWords(definition, wordLimitFor(definition, MAX_THESIS_WORDS)) })
-    if (terms.length === MAX_TERMS) break
+    terms.push({ term: term.trim(), definition: limitWords(definition, wordLimitFor(definition, level.termWords)) })
+    if (terms.length === level.maxTerms) break
   }
 
-  if (terms.length < MIN_TERMS) {
-    throw new GenerationError(`Список термінів має містити щонайменше ${MIN_TERMS} коректні елементи`)
+  if (terms.length < level.minTerms) {
+    throw new GenerationError(`Список термінів має містити щонайменше ${level.minTerms} коректні елементи`)
   }
   return terms
 }
 
-function validate(type: GenerationType, raw: string, count: number): string {
-  if (type === 'summary') return parseSummary(raw)
-  if (type === 'retelling') return parseRetelling(raw)
+function validate(type: GenerationType, raw: string, count: number, mode: Mode): string {
+  const level = LEVELS[mode]
+  if (type === 'summary') return parseSummary(raw, level)
+  if (type === 'retelling') return parseRetelling(raw, level.retellingWords + Math.ceil(level.retellingWords * 0.1))
   if (type === 'test') return JSON.stringify(parseQuiz(raw, count))
-  return JSON.stringify(parseTerms(raw))
+  return JSON.stringify(parseTerms(raw, level))
 }
 
-function maxTokensFor(type: GenerationType, count: number): number {
-  if (type === 'summary') return 2500
-  if (type === 'retelling') return 900
-  if (type === 'test') return Math.min(6144, 1200 + count * 420)
-  return 4096
+function maxTokensFor(type: GenerationType, count: number, mode: Mode = 'medium'): number {
+  const level = LEVELS[mode]
+  if (type === 'summary') return level.summaryTokens
+  if (type === 'retelling') return level.retellingTokens
+  if (type === 'test') return Math.min(level.quizCap, level.questionBase + count * level.questionTokens)
+  return level.termsTokens
 }
 
 export async function callModel(
@@ -397,6 +504,7 @@ async function generateQuiz(
   text: string,
   count: number,
   material: Material,
+  mode: Mode,
   tracker?: UsageTracker
 ): Promise<string> {
   const kept: QuizQuestion[] = []
@@ -405,14 +513,14 @@ async function generateQuiz(
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const missing = count - kept.length
-    const messages = buildTestMessages(text, missing, material)
+    const messages = buildTestMessages(text, missing, material, mode)
     if (kept.length) {
       const list = kept.map((item) => `- ${item.question}`).join('\n')
       messages[1].content += `\n\nЦі питання вже складені, не повторюй їх і не дублюй їхню тему:\n${list}`
     }
     let raw = ''
     try {
-      raw = await callModel(ai, messages, maxTokensFor('test', missing), attempt === 1 ? 0.35 : 0.2, tracker)
+      raw = await callModel(ai, messages, maxTokensFor('test', missing, mode), attempt === 1 ? 0.35 : 0.2, tracker)
       const { questions, problem } = collectQuiz(raw, missing)
       for (const question of questions) {
         const key = question.question.toLowerCase()
@@ -435,20 +543,21 @@ export async function generateContent(
   ai: Ai,
   type: GenerationType,
   text: string,
-  options: { questionCount?: number; tracker?: UsageTracker; material?: Material } = {}
+  options: { questionCount?: number; tracker?: UsageTracker; material?: Material; mode?: Mode } = {}
 ): Promise<string> {
   const count = options.questionCount ?? QUIZ_QUESTION_COUNT
   const material = options.material ?? 'source'
-  if (type === 'test') return generateQuiz(ai, text, count, material, options.tracker)
+  const mode = options.mode ?? 'medium'
+  if (type === 'test') return generateQuiz(ai, text, count, material, mode, options.tracker)
 
-  const messages = buildMessages(type, text, count, material)
+  const messages = buildMessages(type, text, count, material, mode)
   let lastError = 'Невідома помилка'
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     let raw = ''
     try {
-      raw = await callModel(ai, messages, maxTokensFor(type, count), attempt === 1 ? 0.35 : 0.2, options.tracker)
-      return validate(type, raw, count)
+      raw = await callModel(ai, messages, maxTokensFor(type, count, mode), attempt === 1 ? 0.35 : 0.2, options.tracker)
+      return validate(type, raw, count, mode)
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)
       console.error(`generate ${type} attempt ${attempt} failed: ${lastError}`, raw.slice(0, 400))
@@ -461,4 +570,73 @@ export async function generateContent(
   }
 
   throw new GenerationError(`Не вдалося отримати коректну відповідь моделі: ${lastError}`)
+}
+
+export type Direction = 'shorter' | 'longer'
+
+export function countBullets(markdown: string): number {
+  return markdown.split('\n').filter((line) => line.startsWith('- ')).length
+}
+
+const SHORTER_RULES = `${BASE_RULES}
+
+ЗАВДАННЯ: скоротити готовий конспект приблизно на третину-половину, зберігши структуру й найважливіше.
+
+ПРАВИЛА:
+1. Збережи формат: рівно один заголовок "# ", розділи "## ", за потреби "### ", тези з префіксом "- ", кожна з нового рядка.
+2. Прибери другорядні тези, приклади й повтори, об'єднай близькі тези. Залиш найважливіше.
+3. Усі формули збережи точно як є.
+4. Не додавай нових фактів. Теза — до 20 слів.
+5. Не використовуй таблиці, нумеровані списки, жирний шрифт і блоки коду.`
+
+const LONGER_RULES = `${BASE_RULES}
+
+ЗАВДАННЯ: розширити готовий конспект, доповнивши його деталями з вихідного тексту, приблизно в 1,5–2 рази більше.
+
+ПРАВИЛА:
+1. Збережи формат: рівно один заголовок "# ", розділи "## ", за потреби "### ", тези з префіксом "- ", кожна з нового рядка.
+2. Збережи наявні тези й формули. Додай пропущене важливе: визначення, причини й наслідки, умови застосування, винятки, пояснення формул, хронологію, короткі приклади.
+3. Додавай лише те, що є у вихідному тексті.
+4. Теза — до 35 слів.
+5. Не використовуй таблиці, нумеровані списки, жирний шрифт і блоки коду.`
+
+export async function adjustSummary(
+  ai: Ai,
+  direction: Direction,
+  summary: string,
+  source: string,
+  tracker: UsageTracker
+): Promise<string> {
+  const before = countBullets(summary)
+  const shorter = direction === 'shorter'
+  const messages: ChatMessage[] = [
+    { role: 'system', content: shorter ? SHORTER_RULES : LONGER_RULES },
+    {
+      role: 'user',
+      content: shorter
+        ? `Конспект:\n"""\n${summary}\n"""\n\nСкороти конспект за правилами.`
+        : `Вихідний текст:\n"""\n${prepareSource(source)}\n"""\n\nПоточний конспект:\n"""\n${summary}\n"""\n\nРозшир конспект за правилами.`
+    }
+  ]
+  const limits = shorter ? LEVELS.medium : LEVELS.high
+  let lastError = 'Невідома помилка'
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let raw = ''
+    try {
+      raw = await callModel(ai, messages, shorter ? LEVELS.medium.summaryTokens : LEVELS.high.summaryTokens, attempt === 1 ? 0.3 : 0.2, tracker)
+      const result = parseSummary(raw, { thesisWords: limits.thesisWords, minBullets: 3 })
+      const after = countBullets(result)
+      if (shorter && after >= before) throw new GenerationError('Модель не скоротила конспект')
+      if (!shorter && after <= before) throw new GenerationError('Модель не розширила конспект')
+      return result
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+      console.error(`adjust ${direction} attempt ${attempt} failed: ${lastError}`, raw.slice(0, 400))
+      if (raw) messages.push({ role: 'assistant', content: raw })
+      messages.push({ role: 'user', content: `Відповідь не підійшла: ${lastError}. Повтори завдання, дотримуючись правил.` })
+    }
+  }
+
+  throw new GenerationError(`Не вдалося змінити конспект: ${lastError}`)
 }

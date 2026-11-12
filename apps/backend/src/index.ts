@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import type { Context } from 'hono'
 import { cors } from 'hono/cors'
 import { HTTPException } from 'hono/http-exception'
-import { GenerationError, MAX_QUESTIONS, MIN_QUESTIONS, QUIZ_QUESTION_COUNT, generateContent, normalizeInput, prepareSource } from './prompts'
+import { GenerationError, MAX_QUESTIONS, MIN_QUESTIONS, MODES, QUIZ_QUESTION_COUNT, adjustSummary, countBullets, generateContent, normalizeInput, prepareSource } from './prompts'
 import { LONG_TEXT_CHARS, condenseText } from './condense'
 import { ensureCacheSchema, pruneCache, readImage, readResult, resultKey, sha256Hex, writeImage, writeResult } from './cache'
 import { describeImage, validImage } from './vision'
@@ -38,7 +38,7 @@ import {
   readQuota,
   usageStatements
 } from './usage'
-import type { GenerationType, KeyTerm, QuizQuestion } from './prompts'
+import type { Direction, GenerationType, KeyTerm, Mode, QuizQuestion } from './prompts'
 
 interface Env {
   AI: Ai
@@ -70,6 +70,9 @@ const ALL_TYPES: GenerationType[] = ['summary', 'retelling', 'test', 'terms']
 const MIN_TEXT_CHARS = 80
 const MAX_INPUT_CHARS = 90000
 const TWO_STAGE_CHARS = 4000
+const MIN_BULLETS_TO_SHORTEN = 4
+const MAX_BULLETS_TO_LENGTHEN = 70
+const MAX_SUMMARY_CHARS = 9000
 const MAX_TITLE_CHARS = 120
 const DEFAULT_HISTORY_LIMIT = 30
 const MAX_HISTORY_LIMIT = 100
@@ -208,6 +211,25 @@ function parseId(value: string): number | null {
   return Number.isInteger(id) && id > 0 ? id : null
 }
 
+function quotaError(
+  c: AppContext,
+  quota: { device: { used: number }; global: { used: number } },
+  limit: number,
+  globalLimit: number,
+  guest: boolean
+): Response | null {
+  if (quota.device.used >= limit) {
+    const error = guest
+      ? 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
+      : 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
+    return c.json({ error, resetsAt: nextResetAt(), guest }, 429)
+  }
+  if (quota.global.used >= globalLimit) {
+    return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
+  }
+  return null
+}
+
 app.get('/', (c) => c.json({ name: c.env.APP_NAME, status: 'ok' }))
 
 app.get('/api/health', (c) => c.json({ name: c.env.APP_NAME, status: 'ok' }))
@@ -254,6 +276,15 @@ app.post('/api/generate', async (c) => {
     quizCount = questionCount
   }
 
+  let mode: Mode = 'medium'
+  const rawMode = (body as Record<string, unknown>).mode
+  if (rawMode !== undefined) {
+    if (typeof rawMode !== 'string' || !MODES.includes(rawMode as Mode)) {
+      return c.json({ error: 'Поле mode має бути одним із: low, medium, high' }, 400)
+    }
+    mode = rawMode as Mode
+  }
+
   const normalized = normalizeInput(text)
   const documentTitle = (title?.trim() || deriveTitle(normalized)).slice(0, MAX_TITLE_CHARS)
   const fresh = (body as Record<string, unknown>).fresh === true
@@ -265,7 +296,7 @@ app.post('/api/generate', async (c) => {
 
   await Promise.all(
     requested.map(async (type) => {
-      const key = await resultKey(type, quizCount, normalized)
+      const key = await resultKey(type, quizCount, mode, normalized)
       keys.set(type, key)
       const hit = fresh ? null : await readResult(c.env.DB, key)
       if (hit !== null && decode(type, hit) !== null) {
@@ -281,15 +312,8 @@ app.post('/api/generate', async (c) => {
   const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
   const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
   if (pending.length > 0) {
-    if (quota.device.used >= limit) {
-      const error = user
-        ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
-        : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
-      return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
-    }
-    if (quota.global.used >= globalLimit) {
-      return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
-    }
+    const blocked = quotaError(c, quota, limit, globalLimit, !user)
+    if (blocked) return blocked
   }
 
   const tracker = createTracker()
@@ -306,7 +330,7 @@ app.post('/api/generate', async (c) => {
 
     const run = async (type: GenerationType, material: 'source' | 'summary', input: string) => {
       try {
-        const content = await generateContent(c.env.AI, type, input, { questionCount: quizCount, tracker, material })
+        const content = await generateContent(c.env.AI, type, input, { questionCount: quizCount, tracker, material, mode })
         return { type, content, error: null as string | null }
       } catch (error) {
         console.error(`generation failed [${type}]`, error)
@@ -382,6 +406,7 @@ app.post('/api/generate', async (c) => {
       results,
       errors,
       cached: cachedTypes,
+      mode,
       usage,
       quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit, resetsAt: nextResetAt() }
     },
@@ -403,15 +428,8 @@ app.post('/api/vision', async (c) => {
   if (cached !== null) {
     return c.json({ description: cached, skipped: cached === '', cached: true, neurons: 0, quota: { used: quota.device.used, limit, resetsAt: nextResetAt() } })
   }
-  if (quota.device.used >= limit) {
-    const error = user
-      ? 'Денний ліміт AI для вашого акаунта вичерпано. Він оновиться опівночі за UTC'
-      : 'Гостьовий ліміт AI вичерпано. Увійдіть або створіть акаунт, щоб отримати більше. Ліміт оновиться опівночі за UTC'
-    return c.json({ error, resetsAt: nextResetAt(), guest: !user }, 429)
-  }
-  if (quota.global.used >= globalLimit) {
-    return c.json({ error: 'Сервіс вичерпав денну квоту AI. Спробуйте пізніше, вона оновиться опівночі за UTC', resetsAt: nextResetAt() }, 429)
-  }
+  const blocked = quotaError(c, quota, limit, globalLimit, !user)
+  if (blocked) return blocked
 
   const tracker = createTracker()
   let description: string
@@ -620,6 +638,71 @@ app.get('/api/history/:id', async (c) => {
     sourceText: document.source_text,
     createdAt: document.created_at,
     results
+  })
+})
+
+app.post('/api/history/:id/summary', async (c) => {
+  const { owner, limit, user } = await identify(c)
+
+  const id = parseId(c.req.param('id'))
+  if (id === null) return c.json({ error: 'Некоректний id' }, 400)
+
+  const body = await c.req.json().catch(() => null)
+  const direction = body?.direction as Direction
+  if (direction !== 'shorter' && direction !== 'longer') {
+    return c.json({ error: 'Поле direction має бути shorter або longer' }, 400)
+  }
+
+  const document = await c.env.DB.prepare('SELECT id, source_text FROM documents WHERE id = ? AND owner_id = ?')
+    .bind(id, owner)
+    .first<{ id: number; source_text: string }>()
+  if (!document) return c.json({ error: 'Запис не знайдено' }, 404)
+
+  const row = await c.env.DB.prepare("SELECT content FROM generations WHERE document_id = ? AND type = 'summary' ORDER BY id DESC LIMIT 1")
+    .bind(id)
+    .first<{ content: string }>()
+  if (!row) return c.json({ error: 'У цьому записі немає конспекту' }, 404)
+
+  const bullets = countBullets(row.content)
+  if (direction === 'shorter' && bullets <= MIN_BULLETS_TO_SHORTEN) {
+    return c.json({ error: 'Конспект уже максимально стислий' }, 400)
+  }
+  if (direction === 'longer' && (bullets >= MAX_BULLETS_TO_LENGTHEN || row.content.length > MAX_SUMMARY_CHARS)) {
+    return c.json({ error: 'Конспект уже максимально детальний' }, 400)
+  }
+
+  const globalLimit = limitFrom(c.env.GLOBAL_DAILY_NEURONS, DEFAULT_GLOBAL_LIMIT)
+  const quota = await readQuota(c.env.DB, owner, limit, globalLimit)
+  const blocked = quotaError(c, quota, limit, globalLimit, !user)
+  if (blocked) return blocked
+
+  const tracker = createTracker()
+  let content: string
+  try {
+    content = await adjustSummary(c.env.AI, direction, row.content, document.source_text, tracker)
+  } catch (error) {
+    console.error('adjust failed', error)
+    if (tracker.calls > 0) await c.env.DB.batch(usageStatements(c.env.DB, owner, tracker))
+    const message = error instanceof GenerationError ? error.message : 'Помилка під час звернення до моделі'
+    return c.json({ error: message }, 502)
+  }
+
+  const spent = neuronsOf(tracker)
+  await c.env.DB.batch([
+    c.env.DB.prepare("INSERT INTO generations (document_id, type, content) VALUES (?, 'summary', ?)").bind(id, content),
+    ...usageStatements(c.env.DB, owner, tracker)
+  ])
+
+  return c.json({
+    content,
+    usage: {
+      promptTokens: tracker.promptTokens,
+      completionTokens: tracker.completionTokens,
+      totalTokens: tracker.promptTokens + tracker.completionTokens,
+      modelCalls: tracker.calls,
+      neurons: Math.round(spent * 100) / 100
+    },
+    quota: { used: Math.round((quota.device.used + spent) * 100) / 100, limit, resetsAt: nextResetAt() }
   })
 })
 

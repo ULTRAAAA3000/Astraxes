@@ -22,8 +22,19 @@ export type IconName =
   | 'menu'
   | 'lines'
   | 'image'
+  | 'alert'
+  | 'plus'
+  | 'minus'
 
 const PATHS: Record<IconName, ReactNode> = {
+  alert: (
+    <>
+      <path d="M12 3 2.5 20h19L12 3Z" />
+      <path d="M12 10v4.5M12 17.2v.1" />
+    </>
+  ),
+  plus: <path d="M12 5v14M5 12h14" />,
+  minus: <path d="M5 12h14" />,
   image: (
     <>
       <rect x="3" y="4" width="18" height="16" rx="2" />

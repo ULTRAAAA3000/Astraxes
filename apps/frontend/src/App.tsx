@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, DragEvent, KeyboardEvent } from 'react'
-import { ALL_TYPES, HARD_LIMIT, MIN_CHARS, QUESTION_OPTIONS, SESSION_EXPIRED_EVENT, SOFT_LIMIT, TYPE_LABELS, availableTabs, countWords, estimateTokens, formatDate, request, setToken } from './lib/api'
-import type { Account, Doc, GenType, GenerateResponse, HistoryDetail, HistoryItem, UsageInfo } from './lib/api'
+import { ALL_TYPES, HARD_LIMIT, MIN_CHARS, MODES, MODE_INFO, QUESTION_OPTIONS, SESSION_EXPIRED_EVENT, SOFT_LIMIT, TYPE_LABELS, availableTabs, countWords, estimateNeurons, estimateTokens, formatDate, request, setToken } from './lib/api'
+import type { Account, AdjustResponse, Doc, GenType, GenerateResponse, HistoryDetail, HistoryItem, Mode, UsageInfo } from './lib/api'
 import { SAMPLE_TEXT } from './lib/sample'
 import { ACCEPT, blocksToText, extractFile } from './lib/files'
 import { countImages } from './lib/blocks'
@@ -15,6 +15,7 @@ import RetellingView from './components/RetellingView'
 import FeaturesSection from './components/FeaturesSection'
 import HowItWorksSection from './components/HowItWorksSection'
 import AuthModal from './components/AuthModal'
+import ModeWarning from './components/ModeWarning'
 import AdminSection from './components/AdminSection'
 
 type Theme = 'light' | 'dark'
@@ -28,6 +29,7 @@ interface Toast {
 const DRAFT_KEY = 'astraxes:draft'
 const THEME_KEY = 'astraxes:theme'
 const IMAGES_KEY = 'astraxes:images'
+const MODE_KEY = 'astraxes:mode'
 const TYPE_ICONS: Record<GenType, IconName> = { summary: 'doc', retelling: 'lines', test: 'check-list', terms: 'tag' }
 const STEP_LABELS: Record<GenType, string> = {
   summary: 'Складаю конспект',
@@ -118,6 +120,16 @@ export default function App() {
     }
   })
   const lastRun = useRef('')
+  const [mode, setMode] = useState<Mode>(() => {
+    try {
+      const saved = localStorage.getItem(MODE_KEY)
+      return MODES.includes(saved as Mode) ? (saved as Mode) : 'medium'
+    } catch {
+      return 'medium'
+    }
+  })
+  const [warnOpen, setWarnOpen] = useState(false)
+  const [adjusting, setAdjusting] = useState<'shorter' | 'longer' | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
   const resultRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -219,14 +231,47 @@ export default function App() {
     requestAnimationFrame(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
 
+  const chooseMode = (next: Mode) => {
+    setMode(next)
+    try {
+      localStorage.setItem(MODE_KEY, next)
+    } catch {
+      return
+    }
+  }
+
+  const requestGenerate = () => {
+    if (!canSubmit) return
+    if (mode === 'high') setWarnOpen(true)
+    else void handleGenerate()
+  }
+
+  const adjustSummary = async (direction: 'shorter' | 'longer') => {
+    if (!current || adjusting) return
+    const id = current.id
+    setAdjusting(direction)
+    try {
+      const data = await request<AdjustResponse>(`/api/history/${id}/summary`, { method: 'POST', body: JSON.stringify({ direction }) })
+      setCurrent((prev) => (prev && prev.id === id ? { ...prev, results: { ...prev.results, summary: data.content } } : prev))
+      notify(`${direction === 'shorter' ? 'Конспект скорочено' : 'Конспект розширено'} · ≈ ${data.usage.totalTokens.toLocaleString('uk-UA')} токенів`)
+      loadUsage()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Не вдалося змінити конспект')
+      loadUsage()
+    } finally {
+      setAdjusting(null)
+    }
+  }
+
   const handleGenerate = async () => {
     if (!canSubmit) return
+    setWarnOpen(false)
     setLoading(true)
     setStep(0)
     setError(null)
     requestAnimationFrame(() => resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
     try {
-      const runKey = JSON.stringify([text, chosenTypes, selected.test ? questionCount : 0])
+      const runKey = JSON.stringify([text, chosenTypes, selected.test ? questionCount : 0, mode])
       const data = await request<GenerateResponse>('/api/generate', {
         method: 'POST',
         body: JSON.stringify({
@@ -234,6 +279,7 @@ export default function App() {
           text,
           types: chosenTypes,
           questionCount: selected.test ? questionCount : undefined,
+          mode,
           fresh: lastRun.current === runKey || undefined
         })
       })
@@ -354,7 +400,7 @@ export default function App() {
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
       event.preventDefault()
-      handleGenerate()
+      requestGenerate()
     }
   }
 
@@ -440,6 +486,8 @@ export default function App() {
   const failed = current?.errors ? (Object.entries(current.errors) as [GenType, string][]) : []
   const visibleHistory = history.filter((item) => item.title.toLowerCase().includes(query.trim().toLowerCase()))
   const progress = Math.min(100, (chars / HARD_LIMIT) * 100)
+  const estimate = estimateNeurons(chars, chosenTypes, questionCount, mode)
+  const estimateOf = (target: Mode) => estimateNeurons(chars, chosenTypes, questionCount, target)
   const usagePercent = usageInfo ? Math.min(100, Math.round((usageInfo.used / usageInfo.limit) * 100)) : 0
 
   return (
@@ -691,8 +739,25 @@ export default function App() {
                 </div>
               )}
             </div>
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+              <div className="flex items-center gap-2.5">
+                <span className="text-xs text-muted">Режим</span>
+                <div role="radiogroup" aria-label="Режим роботи" className="seg">
+                  {MODES.map((item) => (
+                    <button key={item} type="button" role="radio" aria-checked={mode === item} data-level={item} onClick={() => chooseMode(item)}>
+                      {item === 'high' && <Icon name="alert" className="h-3.5 w-3.5" />}
+                      {MODE_INFO[item].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <p className={`text-xs ${mode === 'high' ? 'font-medium text-bad' : 'text-muted'}`}>
+                {MODE_INFO[mode].hint}
+                {chars >= MIN_CHARS && estimate > 0 && usageInfo ? ` · ≈ ${Math.max(1, Math.round((estimate / usageInfo.limit) * 100))}% денного ліміту` : ''}
+              </p>
+            </div>
             <div className="flex items-center justify-end gap-4">
-              <button type="button" onClick={handleGenerate} disabled={!canSubmit} className="btn btn-primary w-full sm:w-auto">
+              <button type="button" onClick={requestGenerate} disabled={!canSubmit} className="btn btn-primary w-full sm:w-auto">
                 {loading ? <span className="spinner" /> : <Icon name="sparkles" />}
                 {loading ? 'Генерація…' : 'Згенерувати'}
               </button>
@@ -792,6 +857,20 @@ export default function App() {
                   </div>
                 </div>
 
+                {tab === 'summary' && current.results.summary !== undefined && (
+                  <div className="mt-5 flex flex-wrap items-center gap-2.5">
+                    <span className="text-xs text-muted">Розмір конспекту</span>
+                    <button type="button" onClick={() => adjustSummary('shorter')} disabled={adjusting !== null} className="btn btn-ghost btn-sm">
+                      {adjusting === 'shorter' ? <span className="spinner" /> : <Icon name="minus" className="h-3.5 w-3.5" />}
+                      Коротше
+                    </button>
+                    <button type="button" onClick={() => adjustSummary('longer')} disabled={adjusting !== null} className="btn btn-ghost btn-sm">
+                      {adjusting === 'longer' ? <span className="spinner" /> : <Icon name="plus" className="h-3.5 w-3.5" />}
+                      Детальніше
+                    </button>
+                  </div>
+                )}
+
                 <div key={tab} className="reveal mt-7">
                   {tab === 'summary' && current.results.summary !== undefined && <SummaryView markdown={current.results.summary} />}
                   {tab === 'retelling' && current.results.retelling !== undefined && <RetellingView text={current.results.retelling} />}
@@ -890,6 +969,21 @@ export default function App() {
         {account?.role === 'admin' && <AdminSection currentId={account.id} notify={notify} />}
       </main>
 
+      {warnOpen && (
+        <ModeWarning
+          estimate={estimate}
+          medium={estimateOf('medium')}
+          low={estimateOf('low')}
+          limit={usageInfo ? usageInfo.limit : null}
+          used={usageInfo ? usageInfo.used : null}
+          onConfirm={() => void handleGenerate()}
+          onSwitch={() => {
+            chooseMode('medium')
+            setWarnOpen(false)
+          }}
+          onCancel={() => setWarnOpen(false)}
+        />
+      )}
       {authMode && <AuthModal initialMode={authMode} onClose={() => setAuthMode(null)} onAuthed={onAuthed} />}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-[max(1.5rem,env(safe-area-inset-bottom))] z-[70] flex flex-col items-center gap-2 px-4">

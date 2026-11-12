@@ -817,3 +817,8 @@ button:disabled {
   color: var(--inv-fg);
   background: color-mix(in srgb, var(--inv-fg) 14%, transparent);
 }
+
+.seg button[aria-checked="true"][data-level="high"] {
+  background: var(--bad);
+  color: #fff;
+}

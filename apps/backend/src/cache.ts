@@ -24,8 +24,8 @@ export async function ensureCacheSchema(db: D1Database): Promise<void> {
   ])
 }
 
-export function resultKey(type: string, count: number, text: string): Promise<string> {
-  return sha256Hex(`${type}|${type === 'test' ? count : 0}|${text}`)
+export function resultKey(type: string, count: number, mode: string, text: string): Promise<string> {
+  return sha256Hex(`${type}|${type === 'test' ? count : 0}|${mode}|${text}`)
 }
 
 export async function readResult(db: D1Database, key: string): Promise<string | null> {

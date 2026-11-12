@@ -73,6 +73,7 @@ export interface AdminUser {
 }
 
 export interface GenerateResponse {
+  mode?: Mode
   documentId: number
   title: string
   condensed: boolean
@@ -186,4 +187,44 @@ export function countWords(text: string): number {
 
 export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 2.4)
+}
+
+export type Mode = 'low' | 'medium' | 'high'
+export const MODES: Mode[] = ['low', 'medium', 'high']
+export const MODE_INFO: Record<Mode, { label: string; hint: string }> = {
+  low: { label: 'Низький', hint: 'Стисло й економно: лише найголовніше' },
+  medium: { label: 'Середній', hint: 'Збалансований обсяг, рекомендований' },
+  high: { label: 'Високий', hint: 'Докладно та глибоко, витрачає значно більше токенів' }
+}
+
+const OUTPUT_TOKENS: Record<Mode, { summary: number; retelling: number; terms: number; question: number }> = {
+  low: { summary: 600, retelling: 130, terms: 200, question: 90 },
+  medium: { summary: 1300, retelling: 300, terms: 550, question: 130 },
+  high: { summary: 2900, retelling: 600, terms: 1100, question: 200 }
+}
+
+const INPUT_NEURONS = 4119 / 1_000_000
+const OUTPUT_NEURONS = 34868 / 1_000_000
+
+export function estimateNeurons(chars: number, types: GenType[], questionCount: number, mode: Mode): number {
+  if (!types.length || chars <= 0) return 0
+  const source = estimateTokens(Math.min(chars, 30000))
+  const derived = chars > 4000 && types.includes('summary') ? 0.25 : 1
+  let input = source * (1 + derived * (types.length - 1))
+  let output = 0
+  const out = OUTPUT_TOKENS[mode]
+  if (types.includes('summary')) output += out.summary
+  if (types.includes('retelling')) output += out.retelling
+  if (types.includes('terms')) output += out.terms
+  if (types.includes('test')) output += out.question * questionCount
+  if (chars > 14000) {
+    input += estimateTokens(chars)
+    output += Math.min(10, Math.ceil(chars / 9000)) * 220
+  }
+  return Math.round(input * INPUT_NEURONS + output * OUTPUT_NEURONS)
+}
+
+export interface AdjustResponse {
+  content: string
+  usage: Usage
 }
